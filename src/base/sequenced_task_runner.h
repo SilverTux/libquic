@@ -5,7 +5,10 @@
 #ifndef BASE_SEQUENCED_TASK_RUNNER_H_
 #define BASE_SEQUENCED_TASK_RUNNER_H_
 
+#include <memory>
+
 #include "base/base_export.h"
+#include "base/callback.h"
 #include "base/sequenced_task_runner_helpers.h"
 #include "base/task_runner.h"
 
@@ -108,52 +111,49 @@ class BASE_EXPORT SequencedTaskRunner : public TaskRunner {
   // TODO(akalin): Get rid of the boolean return value for the methods
   // below.
 
-  bool PostNonNestableTask(const tracked_objects::Location& from_here,
-                           const Closure& task);
+  bool PostNonNestableTask(const Location& from_here, OnceClosure task);
 
-  virtual bool PostNonNestableDelayedTask(
-      const tracked_objects::Location& from_here,
-      const Closure& task,
-      base::TimeDelta delay) = 0;
+  virtual bool PostNonNestableDelayedTask(const Location& from_here,
+                                          OnceClosure task,
+                                          base::TimeDelta delay) = 0;
 
   // Submits a non-nestable task to delete the given object.  Returns
   // true if the object may be deleted at some point in the future,
   // and false if the object definitely will not be deleted.
   template <class T>
-  bool DeleteSoon(const tracked_objects::Location& from_here,
-                  const T* object) {
-    return
-        subtle::DeleteHelperInternal<T, bool>::DeleteViaSequencedTaskRunner(
-            this, from_here, object);
+  bool DeleteSoon(const Location& from_here, const T* object) {
+    return DeleteOrReleaseSoonInternal(from_here, &DeleteHelper<T>::DoDelete,
+                                       object);
+  }
+
+  template <class T>
+  bool DeleteSoon(const Location& from_here, std::unique_ptr<T> object) {
+    return DeleteSoon(from_here, object.release());
   }
 
   // Submits a non-nestable task to release the given object.  Returns
   // true if the object may be released at some point in the future,
   // and false if the object definitely will not be released.
   template <class T>
-  bool ReleaseSoon(const tracked_objects::Location& from_here,
-                   T* object) {
-    return
-        subtle::ReleaseHelperInternal<T, bool>::ReleaseViaSequencedTaskRunner(
-            this, from_here, object);
+  bool ReleaseSoon(const Location& from_here, const T* object) {
+    return DeleteOrReleaseSoonInternal(from_here, &ReleaseHelper<T>::DoRelease,
+                                       object);
   }
 
  protected:
   ~SequencedTaskRunner() override {}
 
  private:
-  template <class T, class R> friend class subtle::DeleteHelperInternal;
-  template <class T, class R> friend class subtle::ReleaseHelperInternal;
-
-  bool DeleteSoonInternal(const tracked_objects::Location& from_here,
-                          void(*deleter)(const void*),
-                          const void* object);
-
-  bool ReleaseSoonInternal(const tracked_objects::Location& from_here,
-                           void(*releaser)(const void*),
-                           const void* object);
+  bool DeleteOrReleaseSoonInternal(const Location& from_here,
+                                   void (*deleter)(const void*),
+                                   const void* object);
 };
 
+// Sample usage with std::unique_ptr :
+// std::unique_ptr<Foo, base::OnTaskRunnerDeleter> ptr(
+//     new Foo, base::OnTaskRunnerDeleter(my_task_runner));
+//
+// For RefCounted see base::RefCountedDeleteOnSequence.
 struct BASE_EXPORT OnTaskRunnerDeleter {
   explicit OnTaskRunnerDeleter(scoped_refptr<SequencedTaskRunner> task_runner);
   ~OnTaskRunnerDeleter();
@@ -161,11 +161,10 @@ struct BASE_EXPORT OnTaskRunnerDeleter {
   OnTaskRunnerDeleter(OnTaskRunnerDeleter&&);
   OnTaskRunnerDeleter& operator=(OnTaskRunnerDeleter&&);
 
+  // For compatibility with std:: deleters.
   template <typename T>
   void operator()(const T* ptr) {
-    if (task_runner_->RunsTasksOnCurrentThread())
-      delete ptr;
-    else if (ptr)
+    if (ptr)
       task_runner_->DeleteSoon(FROM_HERE, ptr);
   }
 

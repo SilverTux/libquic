@@ -6,7 +6,7 @@
 #define BASE_TASK_SCHEDULER_TASK_H_
 
 #include "base/base_export.h"
-#include "base/callback_forward.h"
+#include "base/callback.h"
 #include "base/location.h"
 #include "base/macros.h"
 #include "base/memory/ref_counted.h"
@@ -23,16 +23,27 @@ namespace internal {
 // profiling inherited from PendingTask.
 struct BASE_EXPORT Task : public PendingTask {
   // |posted_from| is the site the task was posted from. |task| is the closure
-  // to run. |traits| is metadata about the task. |delay| is a delay that must
-  // expire before the Task runs.
-  Task(const tracked_objects::Location& posted_from,
-       const Closure& task,
+  // to run. |traits_in| is metadata about the task. |delay| is a delay that
+  // must expire before the Task runs. If |delay| is non-zero and the shutdown
+  // behavior in |traits| is BLOCK_SHUTDOWN, the shutdown behavior is
+  // automatically adjusted to SKIP_ON_SHUTDOWN.
+  Task(const Location& posted_from,
+       OnceClosure task,
        const TaskTraits& traits,
-       const TimeDelta& delay);
+       TimeDelta delay);
+
+  // Task is move-only to avoid mistakes that cause reference counts to be
+  // accidentally bumped.
+  Task(Task&& other) noexcept;
+  Task(const Task&) = delete;
+
   ~Task();
 
   // The TaskTraits of this task.
   const TaskTraits traits;
+
+  // The delay that must expire before the task runs.
+  const TimeDelta delay;
 
   // The time at which the task was inserted in its sequence. For an undelayed
   // task, this happens at post time. For a delayed task, this happens some
@@ -51,11 +62,6 @@ struct BASE_EXPORT Task : public PendingTask {
   // support TaskRunnerHandles.
   scoped_refptr<SequencedTaskRunner> sequenced_task_runner_ref;
   scoped_refptr<SingleThreadTaskRunner> single_thread_task_runner_ref;
-
- private:
-  // Disallow copies to make sure no unnecessary ref-bumps are incurred. Making
-  // it move-only would be an option, but isn't necessary for now.
-  DISALLOW_COPY_AND_ASSIGN(Task);
 };
 
 }  // namespace internal

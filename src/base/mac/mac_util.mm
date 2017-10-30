@@ -100,7 +100,11 @@ LSSharedFileListItemRef GetLoginItemForApp() {
         [login_items_array objectAtIndex:i]);
     CFURLRef item_url_ref = NULL;
 
-    if (LSSharedFileListItemResolve(item, 0, &item_url_ref, NULL) == noErr) {
+    // It seems that LSSharedFileListItemResolve() can return NULL in
+    // item_url_ref even if the function itself returns noErr. See
+    // https://crbug.com/760989
+    if (LSSharedFileListItemResolve(item, 0, &item_url_ref, NULL) == noErr &&
+        item_url_ref) {
       ScopedCFTypeRef<CFURLRef> item_url(item_url_ref);
       if (CFEqual(item_url, url)) {
         CFRetain(item);
@@ -121,19 +125,6 @@ bool IsHiddenLoginItem(LSSharedFileListItemRef item) {
 }
 
 }  // namespace
-
-std::string PathFromFSRef(const FSRef& ref) {
-  ScopedCFTypeRef<CFURLRef> url(
-      CFURLCreateFromFSRef(kCFAllocatorDefault, &ref));
-  NSString *path_string = [(NSURL *)url.get() path];
-  return [path_string fileSystemRepresentation];
-}
-
-bool FSRefFromPath(const std::string& path, FSRef* ref) {
-  OSStatus status = FSPathMakeRef((const UInt8*)path.c_str(),
-                                  ref, nil);
-  return status == noErr;
-}
 
 CGColorSpaceRef GetGenericRGBColorSpace() {
   // Leaked. That's OK, it's scoped to the lifetime of the application.
@@ -216,26 +207,6 @@ void SwitchFullScreenModes(FullScreenMode from_mode, FullScreenMode to_mode) {
   g_full_screen_requests[to_mode] =
       std::max(g_full_screen_requests[to_mode] + 1, 1);
   SetUIMode();
-}
-
-bool AmIForeground() {
-  ProcessSerialNumber foreground_psn = { 0 };
-  OSErr err = GetFrontProcess(&foreground_psn);
-  if (err != noErr) {
-    OSSTATUS_DLOG(WARNING, err) << "GetFrontProcess";
-    return false;
-  }
-
-  ProcessSerialNumber my_psn = { 0, kCurrentProcess };
-
-  Boolean result = FALSE;
-  err = SameProcess(&foreground_psn, &my_psn, &result);
-  if (err != noErr) {
-    OSSTATUS_DLOG(WARNING, err) << "SameProcess";
-    return false;
-  }
-
-  return result;
 }
 
 bool SetFileBackupExclusion(const FilePath& file_path) {
@@ -329,11 +300,21 @@ bool WasLaunchedAsLoginOrResumeItem() {
   ProcessInfoRec info = {};
   info.processInfoLength = sizeof(info);
 
+// GetProcessInformation has been deprecated since macOS 10.9, but there is no
+// replacement that provides the information we need. See
+// https://crbug.com/650854.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
   if (GetProcessInformation(&psn, &info) == noErr) {
+#pragma clang diagnostic pop
     ProcessInfoRec parent_info = {};
     parent_info.processInfoLength = sizeof(parent_info);
-    if (GetProcessInformation(&info.processLauncher, &parent_info) == noErr)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (GetProcessInformation(&info.processLauncher, &parent_info) == noErr) {
+#pragma clang diagnostic pop
       return parent_info.processSignature == 'lgnw';
+    }
   }
   return false;
 }
@@ -441,9 +422,9 @@ int MacOSXMinorVersionInternal() {
   // immediate death.
   CHECK(darwin_major_version >= 6);
   int mac_os_x_minor_version = darwin_major_version - 4;
-  DLOG_IF(WARNING, darwin_major_version > 16) << "Assuming Darwin "
-      << base::IntToString(darwin_major_version) << " is Mac OS X 10."
-      << base::IntToString(mac_os_x_minor_version);
+  DLOG_IF(WARNING, darwin_major_version > 17)
+      << "Assuming Darwin " << base::IntToString(darwin_major_version)
+      << " is macOS 10." << base::IntToString(mac_os_x_minor_version);
 
   return mac_os_x_minor_version;
 }

@@ -4,149 +4,91 @@
 
 #include "base/task_scheduler/delayed_task_manager.h"
 
-#include <utility>
+#include <algorithm>
 
+#include "base/bind.h"
 #include "base/logging.h"
-#include "base/task_scheduler/scheduler_worker_pool.h"
+#include "base/task_runner.h"
+#include "base/task_scheduler/task.h"
 
 namespace base {
 namespace internal {
 
-struct DelayedTaskManager::DelayedTask {
-  DelayedTask(std::unique_ptr<Task> task,
-              scoped_refptr<Sequence> sequence,
-              SchedulerWorker* worker,
-              SchedulerWorkerPool* worker_pool,
-              uint64_t index)
-      : task(std::move(task)),
-        sequence(std::move(sequence)),
-        worker(worker),
-        worker_pool(worker_pool),
-        index(index) {}
-
-  DelayedTask(DelayedTask&& other) = default;
-
-  ~DelayedTask() = default;
-
-  DelayedTask& operator=(DelayedTask&& other) = default;
-
-  // |task| will be posted to |worker_pool| with |sequence| and |worker|
-  // when it becomes ripe for execution.
-  std::unique_ptr<Task> task;
-  scoped_refptr<Sequence> sequence;
-  SchedulerWorker* worker;
-  SchedulerWorkerPool* worker_pool;
-
-  // Ensures that tasks that have the same |delayed_run_time| are sorted
-  // according to the order in which they were added to the DelayedTaskManager.
-  uint64_t index;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(DelayedTask);
-};
-
-DelayedTaskManager::DelayedTaskManager(
-    const Closure& on_delayed_run_time_updated)
-    : on_delayed_run_time_updated_(on_delayed_run_time_updated) {
-  DCHECK(!on_delayed_run_time_updated_.is_null());
+DelayedTaskManager::DelayedTaskManager(std::unique_ptr<TickClock> tick_clock)
+    : tick_clock_(std::move(tick_clock)) {
+  DCHECK(tick_clock_);
 }
 
 DelayedTaskManager::~DelayedTaskManager() = default;
 
-void DelayedTaskManager::AddDelayedTask(std::unique_ptr<Task> task,
-                                        scoped_refptr<Sequence> sequence,
-                                        SchedulerWorker* worker,
-                                        SchedulerWorkerPool* worker_pool) {
-  DCHECK(task);
-  DCHECK(sequence);
-  DCHECK(worker_pool);
+void DelayedTaskManager::Start(
+    scoped_refptr<TaskRunner> service_thread_task_runner) {
+  DCHECK(service_thread_task_runner);
 
-  const TimeTicks new_task_delayed_run_time = task->delayed_run_time;
-  TimeTicks current_delayed_run_time;
+  decltype(tasks_added_before_start_) tasks_added_before_start;
 
   {
     AutoSchedulerLock auto_lock(lock_);
-
-    if (!delayed_tasks_.empty())
-      current_delayed_run_time = delayed_tasks_.top().task->delayed_run_time;
-
-    delayed_tasks_.emplace(std::move(task), std::move(sequence), worker,
-                           worker_pool, ++delayed_task_index_);
+    DCHECK(!service_thread_task_runner_);
+    DCHECK(!started_.IsSet());
+    service_thread_task_runner_ = std::move(service_thread_task_runner);
+    tasks_added_before_start = std::move(tasks_added_before_start_);
+    // |service_thread_task_runner_| must not change after |started_| is set
+    // (cf. comment above |lock_| in header file).
+    started_.Set();
   }
 
-  if (current_delayed_run_time.is_null() ||
-      new_task_delayed_run_time < current_delayed_run_time) {
-    on_delayed_run_time_updated_.Run();
+  const TimeTicks now = tick_clock_->NowTicks();
+  for (auto& task_and_callback : tasks_added_before_start) {
+    const TimeDelta delay =
+        std::max(TimeDelta(), task_and_callback.first->delayed_run_time - now);
+    AddDelayedTaskNow(std::move(task_and_callback.first), delay,
+                      std::move(task_and_callback.second));
   }
 }
 
-void DelayedTaskManager::PostReadyTasks() {
-  const TimeTicks now = Now();
+void DelayedTaskManager::AddDelayedTask(
+    std::unique_ptr<Task> task,
+    PostTaskNowCallback post_task_now_callback) {
+  DCHECK(task);
 
-  // Move delayed tasks that are ready for execution into |ready_tasks|. Don't
-  // post them right away to avoid imposing an unecessary lock dependency on
-  // PostTaskNowHelper.
-  std::vector<DelayedTask> ready_tasks;
+  const TimeDelta delay = task->delay;
+  DCHECK(!delay.is_zero());
 
-  {
+  // Use CHECK instead of DCHECK to crash earlier. See http://crbug.com/711167
+  // for details.
+  CHECK(task->task);
+
+  // If |started_| is set, the DelayedTaskManager is in a stable state and
+  // AddDelayedTaskNow() can be called without synchronization. Otherwise, it is
+  // necessary to acquire |lock_| and recheck.
+  if (started_.IsSet()) {
+    AddDelayedTaskNow(std::move(task), delay,
+                      std::move(post_task_now_callback));
+  } else {
     AutoSchedulerLock auto_lock(lock_);
-    while (!delayed_tasks_.empty() &&
-           delayed_tasks_.top().task->delayed_run_time <= now) {
-      // The const_cast for std::move is okay since we're immediately popping
-      // the task from |delayed_tasks_|. See DelayedTaskComparator::operator()
-      // for minor debug-check implications.
-      ready_tasks.push_back(
-          std::move(const_cast<DelayedTask&>(delayed_tasks_.top())));
-      delayed_tasks_.pop();
+    if (started_.IsSet()) {
+      AddDelayedTaskNow(std::move(task), delay,
+                        std::move(post_task_now_callback));
+    } else {
+      tasks_added_before_start_.push_back(
+          {std::move(task), std::move(post_task_now_callback)});
     }
   }
-
-  // Post delayed tasks that are ready for execution.
-  for (auto& delayed_task : ready_tasks) {
-    delayed_task.worker_pool->PostTaskWithSequenceNow(
-        std::move(delayed_task.task), std::move(delayed_task.sequence),
-        delayed_task.worker);
-  }
 }
 
-TimeTicks DelayedTaskManager::GetDelayedRunTime() const {
-  AutoSchedulerLock auto_lock(lock_);
-
-  if (delayed_tasks_.empty())
-    return TimeTicks();
-
-  return delayed_tasks_.top().task->delayed_run_time;
-}
-
-// In std::priority_queue, the largest element is on top. Therefore, this
-// comparator returns true if the delayed run time of |right| is earlier than
-// the delayed run time of |left|.
-bool DelayedTaskManager::DelayedTaskComparator::operator()(
-    const DelayedTask& left,
-    const DelayedTask& right) const {
-#ifndef NDEBUG
-  // Due to STL consistency checks in Windows and const_cast'ing right before
-  // popping the DelayedTask, a null task can be passed to this comparator in
-  // Debug builds. To satisfy these consistency checks, this comparator
-  // considers null tasks to be the larger than anything.
-  DCHECK(left.task || right.task);
-  if (!left.task)
-    return false;
-  if (!right.task)
-    return true;
-#else
-  DCHECK(left.task);
-  DCHECK(right.task);
-#endif  // NDEBUG
-  if (left.task->delayed_run_time > right.task->delayed_run_time)
-    return true;
-  if (left.task->delayed_run_time < right.task->delayed_run_time)
-    return false;
-  return left.index > right.index;
-}
-
-TimeTicks DelayedTaskManager::Now() const {
-  return TimeTicks::Now();
+void DelayedTaskManager::AddDelayedTaskNow(
+    std::unique_ptr<Task> task,
+    TimeDelta delay,
+    PostTaskNowCallback post_task_now_callback) {
+  DCHECK(task);
+  DCHECK(started_.IsSet());
+  // TODO(fdoray): Use |task->delayed_run_time| on the service thread
+  // MessageLoop rather than recomputing it from |delay|.
+  service_thread_task_runner_->PostDelayedTask(
+      FROM_HERE,
+      BindOnce(std::move(post_task_now_callback), Passed(std::move(task))),
+      delay);
 }
 
 }  // namespace internal

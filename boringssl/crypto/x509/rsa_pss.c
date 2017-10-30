@@ -72,9 +72,9 @@ ASN1_SEQUENCE(RSA_PSS_PARAMS) = {
   ASN1_EXP_OPT(RSA_PSS_PARAMS, maskGenAlgorithm, X509_ALGOR,1),
   ASN1_EXP_OPT(RSA_PSS_PARAMS, saltLength, ASN1_INTEGER,2),
   ASN1_EXP_OPT(RSA_PSS_PARAMS, trailerField, ASN1_INTEGER,3),
-} ASN1_SEQUENCE_END(RSA_PSS_PARAMS);
+} ASN1_SEQUENCE_END(RSA_PSS_PARAMS)
 
-IMPLEMENT_ASN1_FUNCTIONS(RSA_PSS_PARAMS);
+IMPLEMENT_ASN1_FUNCTIONS(RSA_PSS_PARAMS)
 
 
 /* Given an MGF1 Algorithm ID decode to an Algorithm Identifier */
@@ -279,11 +279,11 @@ int x509_rsa_pss_to_ctx(EVP_MD_CTX *ctx, X509_ALGOR *sigalg, EVP_PKEY *pkey) {
     goto err;
   }
 
-  EVP_PKEY_CTX *pkctx;
-  if (!EVP_DigestVerifyInit(ctx, &pkctx, md, NULL, pkey) ||
-      !EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) ||
-      !EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen) ||
-      !EVP_PKEY_CTX_set_rsa_mgf1_md(pkctx, mgf1md)) {
+  EVP_PKEY_CTX *pctx;
+  if (!EVP_DigestVerifyInit(ctx, &pctx, md, NULL, pkey) ||
+      !EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) ||
+      !EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, saltlen) ||
+      !EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, mgf1md)) {
     goto err;
   }
 

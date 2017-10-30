@@ -146,12 +146,6 @@ static int null_callback(int ok, X509_STORE_CTX *e)
     return ok;
 }
 
-#if 0
-static int x509_subject_cmp(X509 **a, X509 **b)
-{
-    return X509_subject_name_cmp(*a, *b);
-}
-#endif
 /* Return 1 is a certificate is self signed */
 static int cert_self_signed(X509 *x)
 {
@@ -198,6 +192,7 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
     STACK_OF(X509) *sktmp = NULL;
     if (ctx->cert == NULL) {
         OPENSSL_PUT_ERROR(X509, X509_R_NO_CERT_SET_FOR_US_TO_VERIFY);
+        ctx->error = X509_V_ERR_INVALID_CALL;
         return -1;
     }
     if (ctx->chain != NULL) {
@@ -206,6 +201,7 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
          * cannot do another one.
          */
         OPENSSL_PUT_ERROR(X509, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
+        ctx->error = X509_V_ERR_INVALID_CALL;
         return -1;
     }
 
@@ -218,16 +214,41 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
     ctx->chain = sk_X509_new_null();
     if (ctx->chain == NULL || !sk_X509_push(ctx->chain, ctx->cert)) {
         OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
+        ctx->error = X509_V_ERR_OUT_OF_MEM;
         goto end;
     }
     X509_up_ref(ctx->cert);
     ctx->last_untrusted = 1;
 
-    /* We use a temporary STACK so we can chop and hack at it */
+    /* We use a temporary STACK so we can chop and hack at it.
+     * sktmp = ctx->untrusted ++ ctx->ctx->additional_untrusted */
     if (ctx->untrusted != NULL
         && (sktmp = sk_X509_dup(ctx->untrusted)) == NULL) {
         OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
+        ctx->error = X509_V_ERR_OUT_OF_MEM;
         goto end;
+    }
+
+    if (ctx->ctx->additional_untrusted != NULL) {
+        if (sktmp == NULL) {
+            sktmp = sk_X509_new_null();
+            if (sktmp == NULL) {
+                OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
+                ctx->error = X509_V_ERR_OUT_OF_MEM;
+                goto end;
+            }
+        }
+
+        for (size_t k = 0; k < sk_X509_num(ctx->ctx->additional_untrusted);
+             k++) {
+            if (!sk_X509_push(sktmp,
+                              sk_X509_value(ctx->ctx->additional_untrusted,
+                              k))) {
+                OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
+                ctx->error = X509_V_ERR_OUT_OF_MEM;
+                goto end;
+            }
+        }
     }
 
     num = sk_X509_num(ctx->chain);
@@ -250,8 +271,10 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
          */
         if (ctx->param->flags & X509_V_FLAG_TRUSTED_FIRST) {
             ok = ctx->get_issuer(&xtmp, ctx, x);
-            if (ok < 0)
+            if (ok < 0) {
+                ctx->error = X509_V_ERR_STORE_LOOKUP;
                 goto end;
+            }
             /*
              * If successful for now free up cert so it will be picked up
              * again later.
@@ -263,11 +286,12 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
         }
 
         /* If we were passed a cert chain, use it first */
-        if (ctx->untrusted != NULL) {
+        if (sktmp != NULL) {
             xtmp = find_issuer(ctx, sktmp, x);
             if (xtmp != NULL) {
                 if (!sk_X509_push(ctx->chain, xtmp)) {
                     OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
+                    ctx->error = X509_V_ERR_OUT_OF_MEM;
                     ok = 0;
                     goto end;
                 }
@@ -349,14 +373,17 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
                 break;
             ok = ctx->get_issuer(&xtmp, ctx, x);
 
-            if (ok < 0)
+            if (ok < 0) {
+                ctx->error = X509_V_ERR_STORE_LOOKUP;
                 goto end;
+            }
             if (ok == 0)
                 break;
             x = xtmp;
             if (!sk_X509_push(ctx->chain, x)) {
                 X509_free(xtmp);
                 OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
+                ctx->error = X509_V_ERR_OUT_OF_MEM;
                 ok = 0;
                 goto end;
             }
@@ -445,13 +472,6 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
     if (!ok)
         goto end;
 
-    /* Check name constraints */
-
-    ok = check_name_constraints(ctx);
-
-    if (!ok)
-        goto end;
-
     ok = check_id(ctx);
 
     if (!ok)
@@ -484,6 +504,12 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
     if (!ok)
         goto end;
 
+    /* Check name constraints */
+
+    ok = check_name_constraints(ctx);
+    if (!ok)
+        goto end;
+
     /* If we get this far evaluate policies */
     if (!bad_chain && (ctx->param->flags & X509_V_FLAG_POLICY_CHECK))
         ok = ctx->check_policy(ctx);
@@ -493,6 +519,10 @@ int X509_verify_cert(X509_STORE_CTX *ctx)
         sk_X509_free(sktmp);
     if (chain_ss != NULL)
         X509_free(chain_ss);
+
+    /* Safety net, error returns must set ctx->error */
+    if (ok <= 0 && ctx->error == X509_V_OK)
+        ctx->error = X509_V_ERR_UNSPECIFIED;
     return ok;
 }
 
@@ -574,12 +604,6 @@ static int check_chain_extensions(X509_STORE_CTX *ctx)
     } else {
         allow_proxy_certs =
             ! !(ctx->param->flags & X509_V_FLAG_ALLOW_PROXY_CERTS);
-        /*
-         * A hack to keep people who don't want to modify their software
-         * happy
-         */
-        if (getenv("OPENSSL_ALLOW_PROXY_CERTS"))
-            allow_proxy_certs = 1;
         purpose = ctx->param->purpose;
     }
 
@@ -709,12 +733,19 @@ static int check_name_constraints(X509_STORE_CTX *ctx)
             NAME_CONSTRAINTS *nc = sk_X509_value(ctx->chain, j)->nc;
             if (nc) {
                 rv = NAME_CONSTRAINTS_check(x, nc);
-                if (rv != X509_V_OK) {
+                switch (rv) {
+                case X509_V_OK:
+                    continue;
+                case X509_V_ERR_OUT_OF_MEM:
+                    ctx->error = rv;
+                    return 0;
+                default:
                     ctx->error = rv;
                     ctx->error_depth = i;
                     ctx->current_cert = x;
                     if (!ctx->verify_cb(0, ctx))
                         return 0;
+                    break;
                 }
             }
         }
@@ -986,13 +1017,25 @@ static int get_crl_sk(X509_STORE_CTX *ctx, X509_CRL **pcrl, X509_CRL **pdcrl,
         crl = sk_X509_CRL_value(crls, i);
         reasons = *preasons;
         crl_score = get_crl_score(ctx, &crl_issuer, &reasons, crl, x);
-
-        if (crl_score > best_score) {
-            best_crl = crl;
-            best_crl_issuer = crl_issuer;
-            best_score = crl_score;
-            best_reasons = reasons;
+        if (crl_score < best_score || crl_score == 0)
+            continue;
+        /* If current CRL is equivalent use it if it is newer */
+        if (crl_score == best_score && best_crl != NULL) {
+            int day, sec;
+            if (ASN1_TIME_diff(&day, &sec, X509_CRL_get_lastUpdate(best_crl),
+                               X509_CRL_get_lastUpdate(crl)) == 0)
+                continue;
+            /*
+             * ASN1_TIME_diff never returns inconsistent signs for |day|
+             * and |sec|.
+             */
+            if (day <= 0 && sec <= 0)
+                continue;
         }
+        best_crl = crl;
+        best_crl_issuer = crl_issuer;
+        best_score = crl_score;
+        best_reasons = reasons;
     }
 
     if (best_crl) {
@@ -1223,6 +1266,17 @@ static void crl_akid_check(X509_STORE_CTX *ctx, X509_CRL *crl,
      */
     for (i = 0; i < sk_X509_num(ctx->untrusted); i++) {
         crl_issuer = sk_X509_value(ctx->untrusted, i);
+        if (X509_NAME_cmp(X509_get_subject_name(crl_issuer), cnm))
+            continue;
+        if (X509_check_akid(crl_issuer, crl->akid) == X509_V_OK) {
+            *pissuer = crl_issuer;
+            *pcrl_score |= CRL_SCORE_AKID;
+            return;
+        }
+    }
+
+    for (i = 0; i < sk_X509_num(ctx->ctx->additional_untrusted); i++) {
+        crl_issuer = sk_X509_value(ctx->ctx->additional_untrusted, i);
         if (X509_NAME_cmp(X509_get_subject_name(crl_issuer), cnm))
             continue;
         if (X509_check_akid(crl_issuer, crl->akid) == X509_V_OK) {
@@ -1605,6 +1659,7 @@ static int check_policy(X509_STORE_CTX *ctx)
                             ctx->param->policies, ctx->param->flags);
     if (ret == 0) {
         OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
+        ctx->error = X509_V_ERR_OUT_OF_MEM;
         return 0;
     }
     /* Invalid or inconsistent extensions */
@@ -1633,7 +1688,12 @@ static int check_policy(X509_STORE_CTX *ctx)
 
     if (ctx->param->flags & X509_V_FLAG_NOTIFY_POLICY) {
         ctx->current_cert = NULL;
-        ctx->error = X509_V_OK;
+        /*
+         * Verification errors need to be "sticky", a callback may have allowed
+         * an SSL handshake to continue despite an error, and we must then
+         * remain in an error state.  Therefore, we MUST NOT clear earlier
+         * verification errors by setting the error to X509_V_OK.
+         */
         if (!ctx->verify_cb(2, ctx))
             return 0;
     }
@@ -1726,9 +1786,7 @@ static int internal_verify(X509_STORE_CTX *ctx)
          * explicitly asked for. It doesn't add any security and just wastes
          * time.
          */
-        if (!xs->valid
-            && (xs != xi
-                || (ctx->param->flags & X509_V_FLAG_CHECK_SS_SIGNATURE))) {
+        if (xs != xi || (ctx->param->flags & X509_V_FLAG_CHECK_SS_SIGNATURE)) {
             if ((pkey = X509_get_pubkey(xi)) == NULL) {
                 ctx->error = X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY;
                 ctx->current_cert = xi;
@@ -1747,8 +1805,6 @@ static int internal_verify(X509_STORE_CTX *ctx)
             EVP_PKEY_free(pkey);
             pkey = NULL;
         }
-
-        xs->valid = 1;
 
  check_cert:
         ok = check_cert_time(ctx, xs);
@@ -1800,7 +1856,7 @@ int X509_cmp_time(const ASN1_TIME *ctm, time_t *cmp_time)
         int max_length = sizeof("YYMMDDHHMMSS+hhmm") - 1;
         if (remaining < min_length || remaining > max_length)
             return 0;
-        memcpy(p, str, 10);
+        OPENSSL_memcpy(p, str, 10);
         p += 10;
         str += 10;
         remaining -= 10;
@@ -1812,7 +1868,7 @@ int X509_cmp_time(const ASN1_TIME *ctm, time_t *cmp_time)
         int max_length = sizeof("YYYYMMDDHHMMSS.fff+hhmm") - 1;
         if (remaining < min_length || remaining > max_length)
             return 0;
-        memcpy(p, str, 12);
+        OPENSSL_memcpy(p, str, 12);
         p += 12;
         str += 12;
         remaining -= 12;
@@ -2038,7 +2094,7 @@ X509_CRL *X509_CRL_diff(X509_CRL *base, X509_CRL *newer,
 
 int X509_STORE_CTX_get_ex_new_index(long argl, void *argp,
                                     CRYPTO_EX_unused * unused,
-                                    CRYPTO_EX_dup *dup_func,
+                                    CRYPTO_EX_dup *dup_unused,
                                     CRYPTO_EX_free *free_func)
 {
     /*
@@ -2047,7 +2103,7 @@ int X509_STORE_CTX_get_ex_new_index(long argl, void *argp,
      */
     int index;
     if (!CRYPTO_get_ex_new_index(&g_ex_data_class, &index, argl, argp,
-                                 dup_func, free_func)) {
+                                 free_func)) {
         return -1;
     }
     return index;
@@ -2118,6 +2174,11 @@ void X509_STORE_CTX_set_cert(X509_STORE_CTX *ctx, X509 *x)
 void X509_STORE_CTX_set_chain(X509_STORE_CTX *ctx, STACK_OF(X509) *sk)
 {
     ctx->untrusted = sk;
+}
+
+STACK_OF(X509) *X509_STORE_CTX_get0_untrusted(X509_STORE_CTX *ctx)
+{
+    return ctx->untrusted;
 }
 
 void X509_STORE_CTX_set0_crls(X509_STORE_CTX *ctx, STACK_OF(X509_CRL) *sk)
@@ -2197,8 +2258,13 @@ X509_STORE_CTX *X509_STORE_CTX_new(void)
         OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
         return NULL;
     }
-    memset(ctx, 0, sizeof(X509_STORE_CTX));
+    X509_STORE_CTX_zero(ctx);
     return ctx;
+}
+
+void X509_STORE_CTX_zero(X509_STORE_CTX *ctx)
+{
+    OPENSSL_memset(ctx, 0, sizeof(X509_STORE_CTX));
 }
 
 void X509_STORE_CTX_free(X509_STORE_CTX *ctx)
@@ -2215,7 +2281,7 @@ int X509_STORE_CTX_init(X509_STORE_CTX *ctx, X509_STORE *store, X509 *x509,
 {
     int ret = 1;
 
-    memset(ctx, 0, sizeof(X509_STORE_CTX));
+    X509_STORE_CTX_zero(ctx);
     ctx->ctx = store;
     ctx->cert = x509;
     ctx->untrusted = chain;
@@ -2308,7 +2374,7 @@ int X509_STORE_CTX_init(X509_STORE_CTX *ctx, X509_STORE *store, X509 *x509,
         X509_VERIFY_PARAM_free(ctx->param);
     }
 
-    memset(ctx, 0, sizeof(X509_STORE_CTX));
+    OPENSSL_memset(ctx, 0, sizeof(X509_STORE_CTX));
     OPENSSL_PUT_ERROR(X509, ERR_R_MALLOC_FAILURE);
     return 0;
 }
@@ -2346,7 +2412,7 @@ void X509_STORE_CTX_cleanup(X509_STORE_CTX *ctx)
         ctx->chain = NULL;
     }
     CRYPTO_free_ex_data(&g_ex_data_class, ctx, &(ctx->ex_data));
-    memset(&ctx->ex_data, 0, sizeof(CRYPTO_EX_DATA));
+    OPENSSL_memset(&ctx->ex_data, 0, sizeof(CRYPTO_EX_DATA));
 }
 
 void X509_STORE_CTX_set_depth(X509_STORE_CTX *ctx, int depth)

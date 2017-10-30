@@ -4,6 +4,8 @@
 
 #include "base/message_loop/message_loop_task_runner.h"
 
+#include <utility>
+
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/message_loop/incoming_task_queue.h"
@@ -22,23 +24,24 @@ void MessageLoopTaskRunner::BindToCurrentThread() {
   valid_thread_id_ = PlatformThread::CurrentId();
 }
 
-bool MessageLoopTaskRunner::PostDelayedTask(
-    const tracked_objects::Location& from_here,
-    const base::Closure& task,
-    base::TimeDelta delay) {
+bool MessageLoopTaskRunner::PostDelayedTask(const Location& from_here,
+                                            OnceClosure task,
+                                            base::TimeDelta delay) {
   DCHECK(!task.is_null()) << from_here.ToString();
-  return incoming_queue_->AddToIncomingQueue(from_here, task, delay, true);
+  return incoming_queue_->AddToIncomingQueue(from_here, std::move(task), delay,
+                                             Nestable::kNestable);
 }
 
 bool MessageLoopTaskRunner::PostNonNestableDelayedTask(
-    const tracked_objects::Location& from_here,
-    const base::Closure& task,
+    const Location& from_here,
+    OnceClosure task,
     base::TimeDelta delay) {
   DCHECK(!task.is_null()) << from_here.ToString();
-  return incoming_queue_->AddToIncomingQueue(from_here, task, delay, false);
+  return incoming_queue_->AddToIncomingQueue(from_here, std::move(task), delay,
+                                             Nestable::kNonNestable);
 }
 
-bool MessageLoopTaskRunner::RunsTasksOnCurrentThread() const {
+bool MessageLoopTaskRunner::RunsTasksInCurrentSequence() const {
   AutoLock lock(valid_thread_id_lock_);
   return valid_thread_id_ == PlatformThread::CurrentId();
 }

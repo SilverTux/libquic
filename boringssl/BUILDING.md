@@ -2,7 +2,7 @@
 
 ## Build Prerequisites
 
-  * [CMake](https://cmake.org/download/) 2.8.8 or later is required.
+  * [CMake](https://cmake.org/download/) 2.8.11 or later is required.
 
   * Perl 5.6.1 or later is required. On Windows,
     [Active State Perl](http://www.activestate.com/activeperl/) has been
@@ -24,12 +24,16 @@
     by CMake, it may be configured explicitly by setting
     `CMAKE_ASM_NASM_COMPILER`.
 
-  * A C compiler is required. On Windows, MSVC 12 (Visual Studio 2013) or later
+  * A C compiler is required. On Windows, MSVC 14 (Visual Studio 2015) or later
     with Platform SDK 8.1 or later are supported. Recent versions of GCC (4.8+)
     and Clang should work on non-Windows platforms, and maybe on Windows too.
+    To build the tests, you also need a C++ compiler with C++11 support.
 
   * [Go](https://golang.org/dl/) is required. If not found by CMake, the go
     executable may be configured explicitly by setting `GO_EXECUTABLE`.
+
+  * To build the x86 and x86\_64 assembly, your assembler must support AVX2
+    instructions and MOVBE. If using GNU binutils, you must have 2.22 or later
 
 ## Building
 
@@ -79,18 +83,27 @@ It's possible to build BoringSSL with the Android NDK using CMake. This has
 been tested with version 10d of the NDK.
 
 Unpack the Android NDK somewhere and export `ANDROID_NDK` to point to the
-directory. Clone https://github.com/taka-no-me/android-cmake into `util/`.  Then
-make a build directory as above and run CMake *twice* like this:
+directory. Then make a build directory as above and run CMake like this:
 
-    cmake -DANDROID_NATIVE_API_LEVEL=android-9 \
-          -DANDROID_ABI=armeabi-v7a \
-          -DCMAKE_TOOLCHAIN_FILE=../util/android-cmake/android.toolchain.cmake \
+    cmake -DANDROID_ABI=armeabi-v7a \
+          -DCMAKE_TOOLCHAIN_FILE=../third_party/android-cmake/android.toolchain.cmake \
           -DANDROID_NATIVE_API_LEVEL=16 \
           -GNinja ..
 
-Once you've run that twice, Ninja should produce Android-compatible binaries.
-You can replace `armeabi-v7a` in the above with `arm64-v8a` to build aarch64
-binaries.
+Once you've run that, Ninja should produce Android-compatible binaries.  You
+can replace `armeabi-v7a` in the above with `arm64-v8a` and use API level 21 or
+higher to build aarch64 binaries.
+
+For other options, see [android-cmake's documentation](./third_party/android-cmake/README.md).
+
+### Building for iOS
+
+To build for iOS, pass `-DCMAKE_OSX_SYSROOT=iphoneos` and
+`-DCMAKE_OSX_ARCHITECTURES=ARCH` to CMake, where `ARCH` is the desired
+architecture, matching values used in the `-arch` flag in Apple's toolchain.
+
+Passing multiple architectures for a multiple-architecture build is not
+supported.
 
 ## Known Limitations on Windows
 
@@ -112,16 +125,18 @@ ARM, unlike Intel, does not have an instruction that allows applications to
 discover the capabilities of the processor. Instead, the capability information
 has to be provided by the operating system somehow.
 
-BoringSSL will try to use `getauxval` to discover the capabilities and, failing
-that, will probe for NEON support by executing a NEON instruction and handling
-any illegal-instruction signal. But some environments don't support that sort
-of thing and, for them, it's possible to configure the CPU capabilities
-at compile time.
+By default, on Linux-based systems, BoringSSL will try to use `getauxval` and
+`/proc` to discover the capabilities. But some environments don't support that
+sort of thing and, for them, it's possible to configure the CPU capabilities at
+compile time.
 
-If you define `OPENSSL_STATIC_ARMCAP` then you can define any of the following
-to enabling the corresponding ARM feature.
+On iOS or builds which define `OPENSSL_STATIC_ARMCAP`, features will be
+determined based on the `__ARM_NEON__` and `__ARM_FEATURE_CRYPTO` preprocessor
+symbols reported by the compiler. These values are usually controlled by the
+`-march` flag. You can also define any of the following to enable the
+corresponding ARM feature.
 
-  * `OPENSSL_STATIC_ARMCAP_NEON` or `__ARM_NEON__` (note that the latter is set by compilers when NEON support is enabled).
+  * `OPENSSL_STATIC_ARMCAP_NEON`
   * `OPENSSL_STATIC_ARMCAP_AES`
   * `OPENSSL_STATIC_ARMCAP_SHA1`
   * `OPENSSL_STATIC_ARMCAP_SHA256`
@@ -129,6 +144,18 @@ to enabling the corresponding ARM feature.
 
 Note that if a feature is enabled in this way, but not actually supported at
 run-time, BoringSSL will likely crash.
+
+## Assembling ARMv8 with Clang
+
+In order to support the ARMv8 crypto instructions, Clang requires that the
+architecture be `armv8-a+crypto`. However, setting that as a general build flag
+would allow the compiler to assume that crypto instructions are *always*
+supported, even without testing for them.
+
+It's possible to set the architecture in an assembly file using the `.arch`
+directive, but only very recent versions of Clang support this. If
+`BORINGSSL_CLANG_SUPPORTS_DOT_ARCH` is defined then `.arch` directives will be
+used with Clang, otherwise you may need to craft acceptable assembler flags.
 
 # Running tests
 

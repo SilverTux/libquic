@@ -7,20 +7,17 @@
 #include <memory>
 
 #include "crypto/hkdf.h"
-#include "crypto/secure_hash.h"
-#include "net/base/url_util.h"
 #include "net/quic/core/crypto/crypto_handshake.h"
 #include "net/quic/core/crypto/crypto_protocol.h"
 #include "net/quic/core/crypto/quic_decrypter.h"
 #include "net/quic/core/crypto/quic_encrypter.h"
 #include "net/quic/core/crypto/quic_random.h"
-#include "net/quic/core/quic_bug_tracker.h"
 #include "net/quic/core/quic_time.h"
 #include "net/quic/core/quic_utils.h"
-#include "url/url_canon.h"
+#include "net/quic/platform/api/quic_bug_tracker.h"
+#include "net/quic/platform/api/quic_logging.h"
+#include "third_party/boringssl/src/include/openssl/sha.h"
 
-using base::StringPiece;
-using std::numeric_limits;
 using std::string;
 
 namespace net {
@@ -28,7 +25,7 @@ namespace net {
 // static
 void CryptoUtils::GenerateNonce(QuicWallTime now,
                                 QuicRandom* random_generator,
-                                StringPiece orbit,
+                                QuicStringPiece orbit,
                                 string* nonce) {
   // a 4-byte timestamp + 28 random bytes.
   nonce->reserve(kNonceSize);
@@ -53,42 +50,10 @@ void CryptoUtils::GenerateNonce(QuicWallTime now,
 }
 
 // static
-bool CryptoUtils::IsValidSNI(StringPiece sni) {
-  // TODO(rtenneti): Support RFC2396 hostname.
-  // NOTE: Microsoft does NOT enforce this spec, so if we throw away hostnames
-  // based on the above spec, we may be losing some hostnames that windows
-  // would consider valid. By far the most common hostname character NOT
-  // accepted by the above spec is '_'.
-  url::CanonHostInfo host_info;
-  string canonicalized_host(CanonicalizeHost(sni.as_string(), &host_info));
-  return !host_info.IsIPAddress() &&
-         IsCanonicalizedHostCompliant(canonicalized_host) &&
-         sni.find_last_of('.') != string::npos;
-}
-
-// static
-string CryptoUtils::NormalizeHostname(const char* hostname) {
-  url::CanonHostInfo host_info;
-  string host(CanonicalizeHost(hostname, &host_info));
-
-  // Walk backwards over the string, stopping at the first trailing dot.
-  size_t host_end = host.length();
-  while (host_end != 0 && host[host_end - 1] == '.') {
-    host_end--;
-  }
-
-  // Erase the trailing dots.
-  if (host_end != host.length()) {
-    host.erase(host_end, host.length() - host_end);
-  }
-  return host;
-}
-
-// static
-bool CryptoUtils::DeriveKeys(StringPiece premaster_secret,
+bool CryptoUtils::DeriveKeys(QuicStringPiece premaster_secret,
                              QuicTag aead,
-                             StringPiece client_nonce,
-                             StringPiece server_nonce,
+                             QuicStringPiece client_nonce,
+                             QuicStringPiece server_nonce,
                              const string& hkdf_input,
                              Perspective perspective,
                              Diversification diversification,
@@ -101,7 +66,7 @@ bool CryptoUtils::DeriveKeys(StringPiece premaster_secret,
   size_t subkey_secret_bytes =
       subkey_secret == nullptr ? 0 : premaster_secret.length();
 
-  StringPiece nonce = client_nonce;
+  QuicStringPiece nonce = client_nonce;
   string nonce_storage;
   if (!server_nonce.empty()) {
     nonce_storage = client_nonce.as_string() + server_nonce.as_string();
@@ -172,27 +137,27 @@ bool CryptoUtils::DeriveKeys(StringPiece premaster_secret,
   }
 
   if (subkey_secret != nullptr) {
-    hkdf.subkey_secret().CopyToString(subkey_secret);
+    *subkey_secret = string(hkdf.subkey_secret());
   }
 
   return true;
 }
 
 // static
-bool CryptoUtils::ExportKeyingMaterial(StringPiece subkey_secret,
-                                       StringPiece label,
-                                       StringPiece context,
+bool CryptoUtils::ExportKeyingMaterial(QuicStringPiece subkey_secret,
+                                       QuicStringPiece label,
+                                       QuicStringPiece context,
                                        size_t result_len,
                                        string* result) {
   for (size_t i = 0; i < label.length(); i++) {
     if (label[i] == '\0') {
-      LOG(ERROR) << "ExportKeyingMaterial label may not contain NULs";
+      QUIC_LOG(ERROR) << "ExportKeyingMaterial label may not contain NULs";
       return false;
     }
   }
   // Create HKDF info input: null-terminated label + length-prefixed context
-  if (context.length() >= numeric_limits<uint32_t>::max()) {
-    LOG(ERROR) << "Context value longer than 2^32";
+  if (context.length() >= std::numeric_limits<uint32_t>::max()) {
+    QUIC_LOG(ERROR) << "Context value longer than 2^32";
     return false;
   }
   uint32_t context_length = static_cast<uint32_t>(context.length());
@@ -201,20 +166,20 @@ bool CryptoUtils::ExportKeyingMaterial(StringPiece subkey_secret,
   info.append(reinterpret_cast<char*>(&context_length), sizeof(context_length));
   info.append(context.data(), context.length());
 
-  crypto::HKDF hkdf(subkey_secret, StringPiece() /* no salt */, info,
+  crypto::HKDF hkdf(subkey_secret, QuicStringPiece() /* no salt */, info,
                     result_len, 0 /* no fixed IV */, 0 /* no subkey secret */);
-  hkdf.client_write_key().CopyToString(result);
+  *result = string(hkdf.client_write_key());
   return true;
 }
 
 // static
-uint64_t CryptoUtils::ComputeLeafCertHash(const std::string& cert) {
-  return QuicUtils::FNV1a_64_Hash(cert.data(), cert.size());
+uint64_t CryptoUtils::ComputeLeafCertHash(QuicStringPiece cert) {
+  return QuicUtils::FNV1a_64_Hash(cert);
 }
 
 QuicErrorCode CryptoUtils::ValidateServerHello(
     const CryptoHandshakeMessage& server_hello,
-    const QuicVersionVector& negotiated_versions,
+    const QuicTransportVersionVector& negotiated_versions,
     string* error_details) {
   DCHECK(error_details != nullptr);
 
@@ -223,18 +188,17 @@ QuicErrorCode CryptoUtils::ValidateServerHello(
     return QUIC_INVALID_CRYPTO_MESSAGE_TYPE;
   }
 
-  const QuicTag* supported_version_tags;
-  size_t num_supported_versions;
-
-  if (server_hello.GetTaglist(kVER, &supported_version_tags,
-                              &num_supported_versions) != QUIC_NO_ERROR) {
+  QuicVersionLabelVector supported_version_labels;
+  if (server_hello.GetVersionLabelList(kVER, &supported_version_labels) !=
+      QUIC_NO_ERROR) {
     *error_details = "server hello missing version list";
     return QUIC_INVALID_CRYPTO_MESSAGE_PARAMETER;
   }
   if (!negotiated_versions.empty()) {
-    bool mismatch = num_supported_versions != negotiated_versions.size();
-    for (size_t i = 0; i < num_supported_versions && !mismatch; ++i) {
-      mismatch = QuicTagToQuicVersion(supported_version_tags[i]) !=
+    bool mismatch =
+        supported_version_labels.size() != negotiated_versions.size();
+    for (size_t i = 0; i < supported_version_labels.size() && !mismatch; ++i) {
+      mismatch = QuicVersionLabelToQuicVersion(supported_version_labels[i]) !=
                  negotiated_versions[i];
     }
     // The server sent a list of supported versions, and the connection
@@ -250,8 +214,8 @@ QuicErrorCode CryptoUtils::ValidateServerHello(
 
 QuicErrorCode CryptoUtils::ValidateClientHello(
     const CryptoHandshakeMessage& client_hello,
-    QuicVersion version,
-    const QuicVersionVector& supported_versions,
+    QuicTransportVersion version,
+    const QuicTransportVersionVector& supported_versions,
     string* error_details) {
   if (client_hello.tag() != kCHLO) {
     *error_details = "Bad tag";
@@ -262,12 +226,14 @@ QuicErrorCode CryptoUtils::ValidateClientHello(
   // speaking, then the client went through a version negotiation.  In this
   // case, we need to make sure that we actually do not support this version
   // and that it wasn't a downgrade attack.
-  QuicTag client_version_tag;
-  if (client_hello.GetUint32(kVER, &client_version_tag) != QUIC_NO_ERROR) {
+  QuicVersionLabel client_version_label;
+  if (client_hello.GetVersionLabel(kVER, &client_version_label) !=
+      QUIC_NO_ERROR) {
     *error_details = "client hello missing version list";
     return QUIC_INVALID_CRYPTO_MESSAGE_PARAMETER;
   }
-  QuicVersion client_version = QuicTagToQuicVersion(client_version_tag);
+  QuicTransportVersion client_version =
+      QuicVersionLabelToQuicVersion(client_version_label);
   if (client_version != version) {
     // Just because client_version is a valid version enum doesn't mean that
     // this server actually supports that version, so we check to see if
@@ -327,14 +293,13 @@ const char* CryptoUtils::HandshakeFailureReasonToString(
 
 // static
 void CryptoUtils::HashHandshakeMessage(const CryptoHandshakeMessage& message,
-                                       string* output) {
-  const QuicData& serialized = message.GetSerialized();
-  std::unique_ptr<crypto::SecureHash> hash(
-      crypto::SecureHash::Create(crypto::SecureHash::SHA256));
-  hash->Update(serialized.data(), serialized.length());
-  uint8_t digest[32];
-  hash->Finish(digest, sizeof(digest));
-  output->assign(reinterpret_cast<const char*>(&digest), sizeof(digest));
+                                       string* output,
+                                       Perspective perspective) {
+  const QuicData& serialized = message.GetSerialized(perspective);
+  uint8_t digest[SHA256_DIGEST_LENGTH];
+  SHA256(reinterpret_cast<const uint8_t*>(serialized.data()),
+         serialized.length(), digest);
+  output->assign(reinterpret_cast<const char*>(digest), sizeof(digest));
 }
 
 }  // namespace net

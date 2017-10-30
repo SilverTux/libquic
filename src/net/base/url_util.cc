@@ -17,9 +17,7 @@
 #include "base/strings/stringprintf.h"
 #include "net/base/escape.h"
 #include "net/base/ip_address.h"
-#if 0
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
-#endif
 #include "url/gurl.h"
 #include "url/url_canon.h"
 #include "url/url_canon_ip.h"
@@ -305,7 +303,6 @@ bool IsCanonicalizedHostCompliant(const std::string& host) {
   return most_recent_component_started_alphanumeric;
 }
 
-#if 0
 bool IsHostnameNonUnique(const std::string& hostname) {
   // CanonicalizeHost requires surrounding brackets to parse an IPv6 address.
   const std::string host_or_ip = hostname.find(':') != std::string::npos ?
@@ -345,12 +342,10 @@ bool IsHostnameNonUnique(const std::string& hostname) {
   // is updated. However, because gTLDs are expected to provide significant
   // advance notice to deprecate older versions of this code, this an
   // acceptable tradeoff.
-  return 0 == registry_controlled_domains::GetRegistryLength(
-                  canonical_name,
-                  registry_controlled_domains::EXCLUDE_UNKNOWN_REGISTRIES,
-                  registry_controlled_domains::EXCLUDE_PRIVATE_REGISTRIES);
+  return !registry_controlled_domains::HostHasRegistryControlledDomain(
+      canonical_name, registry_controlled_domains::EXCLUDE_UNKNOWN_REGISTRIES,
+      registry_controlled_domains::EXCLUDE_PRIVATE_REGISTRIES);
 }
-#endif
 
 bool IsLocalhost(base::StringPiece host) {
   if (IsLocalHostname(host, nullptr))
@@ -378,6 +373,9 @@ bool IsLocalhost(base::StringPiece host) {
 
 GURL SimplifyUrlForRequest(const GURL& url) {
   DCHECK(url.is_valid());
+  // Fast path to avoid re-canonicalization via ReplaceComponents.
+  if (!url.has_username() && !url.has_password() && !url.has_ref())
+    return url;
   GURL::Replacements replacements;
   replacements.ClearUsername();
   replacements.ClearPassword();
@@ -419,6 +417,11 @@ bool HasGoogleHost(const GURL& url) {
       return true;
   }
   return false;
+}
+
+bool IsTLS13ExperimentHost(base::StringPiece host) {
+  return host == "inbox.google.com" || host == "mail.google.com" ||
+         host == "gmail.com";
 }
 
 bool IsLocalHostname(base::StringPiece host, bool* is_local6) {

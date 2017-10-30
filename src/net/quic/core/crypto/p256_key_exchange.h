@@ -2,33 +2,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef NET_QUIC_CRYPTO_P256_KEY_EXCHANGE_H_
-#define NET_QUIC_CRYPTO_P256_KEY_EXCHANGE_H_
+#ifndef NET_QUIC_CORE_CRYPTO_P256_KEY_EXCHANGE_H_
+#define NET_QUIC_CORE_CRYPTO_P256_KEY_EXCHANGE_H_
 
-#include <stdint.h>
-
-#include <memory>
+#include <cstdint>
 #include <string>
 
 #include "base/macros.h"
-#include "base/strings/string_piece.h"
-#include "crypto/openssl_util.h"
-#include "crypto/scoped_openssl_types.h"
-#include "net/base/net_export.h"
 #include "net/quic/core/crypto/key_exchange.h"
-
+#include "net/quic/platform/api/quic_export.h"
+#include "net/quic/platform/api/quic_string_piece.h"
+#include "third_party/boringssl/src/include/openssl/base.h"
 
 namespace net {
 
 // P256KeyExchange implements a KeyExchange using elliptic-curve
 // Diffie-Hellman on NIST P-256.
-class NET_EXPORT_PRIVATE P256KeyExchange : public KeyExchange {
+class QUIC_EXPORT_PRIVATE P256KeyExchange : public KeyExchange {
  public:
   ~P256KeyExchange() override;
 
   // New creates a new key exchange object from a private key. If
   // |private_key| is invalid, nullptr is returned.
-  static P256KeyExchange* New(base::StringPiece private_key);
+  static P256KeyExchange* New(QuicStringPiece private_key);
 
   // |NewPrivateKey| returns a private key, suitable for passing to |New|.
   // If |NewPrivateKey| can't generate a private key, it returns an empty
@@ -37,9 +33,9 @@ class NET_EXPORT_PRIVATE P256KeyExchange : public KeyExchange {
 
   // KeyExchange interface.
   KeyExchange* NewKeyPair(QuicRandom* rand) const override;
-  bool CalculateSharedKey(base::StringPiece peer_public_value,
+  bool CalculateSharedKey(QuicStringPiece peer_public_value,
                           std::string* shared_key) const override;
-  base::StringPiece public_value() const override;
+  QuicStringPiece public_value() const override;
   QuicTag tag() const override;
 
  private:
@@ -54,11 +50,12 @@ class NET_EXPORT_PRIVATE P256KeyExchange : public KeyExchange {
     kUncompressedECPointForm = 0x04,
   };
 
-  // P256KeyExchange takes ownership of |private_key|, and expects
-  // |public_key| consists of |kUncompressedP256PointBytes| bytes.
-  P256KeyExchange(EC_KEY* private_key, const uint8_t* public_key);
+  // P256KeyExchange wraps |private_key|, and expects |public_key| consists of
+  // |kUncompressedP256PointBytes| bytes.
+  P256KeyExchange(bssl::UniquePtr<EC_KEY> private_key,
+                  const uint8_t* public_key);
 
-  crypto::ScopedEC_KEY private_key_;
+  bssl::UniquePtr<EC_KEY> private_key_;
   // The public key stored as an uncompressed P-256 point.
   uint8_t public_key_[kUncompressedP256PointBytes];
 
@@ -66,4 +63,5 @@ class NET_EXPORT_PRIVATE P256KeyExchange : public KeyExchange {
 };
 
 }  // namespace net
-#endif  // NET_QUIC_CRYPTO_P256_KEY_EXCHANGE_H_
+
+#endif  // NET_QUIC_CORE_CRYPTO_P256_KEY_EXCHANGE_H_

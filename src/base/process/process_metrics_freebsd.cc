@@ -11,13 +11,11 @@
 
 #include "base/macros.h"
 #include "base/memory/ptr_util.h"
-#include "base/sys_info.h"
 
 namespace base {
 
 ProcessMetrics::ProcessMetrics(ProcessHandle process)
     : process_(process),
-      processor_count_(SysInfo::NumberOfProcessors()),
       last_system_time_(0),
       last_cpu_(0) {}
 
@@ -58,7 +56,7 @@ size_t ProcessMetrics::GetPeakWorkingSetSize() const {
 }
 
 bool ProcessMetrics::GetMemoryBytes(size_t* private_bytes,
-                                    size_t* shared_bytes) {
+                                    size_t* shared_bytes) const {
   WorkingSetKBytes ws_usage;
   if (!GetWorkingSetKBytes(&ws_usage))
     return false;
@@ -84,7 +82,7 @@ bool ProcessMetrics::GetWorkingSetKBytes(WorkingSetKBytes* ws_usage) const {
   return true;
 }
 
-double ProcessMetrics::GetCPUUsage() {
+double ProcessMetrics::GetPlatformIndependentCPUUsage() {
   struct kinfo_proc info;
   int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, process_ };
   size_t length = sizeof(info);

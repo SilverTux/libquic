@@ -11,9 +11,7 @@
 #include "base/atomicops.h"
 #include "base/base_export.h"
 #include "base/feature_list.h"
-#if 0
 #include "base/memory/shared_memory.h"
-#endif
 #include "base/metrics/histogram_base.h"
 #include "base/metrics/persistent_memory_allocator.h"
 #include "base/strings/string_piece.h"
@@ -21,6 +19,7 @@
 
 namespace base {
 
+class BucketRanges;
 class FilePath;
 class PersistentSampleMapRecords;
 class PersistentSparseHistogramDataManager;
@@ -57,8 +56,8 @@ class BASE_EXPORT PersistentSparseHistogramDataManager {
   // Convenience method that gets the object for a given reference so callers
   // don't have to also keep their own pointer to the appropriate allocator.
   template <typename T>
-  T* GetAsObject(PersistentMemoryAllocator::Reference ref, uint32_t type_id) {
-    return allocator_->GetAsObject<T>(ref, type_id);
+  T* GetAsObject(PersistentMemoryAllocator::Reference ref) {
+    return allocator_->GetAsObject<T>(ref);
   }
 
  private:
@@ -132,8 +131,8 @@ class BASE_EXPORT PersistentSampleMapRecords {
   // cleanliness of the interface), a template is defined that will be
   // resolved when used inside that file.
   template <typename T>
-  T* GetAsObject(PersistentMemoryAllocator::Reference ref, uint32_t type_id) {
-    return data_manager_->GetAsObject<T>(ref, type_id);
+  T* GetAsObject(PersistentMemoryAllocator::Reference ref) {
+    return data_manager_->GetAsObject<T>(ref);
   }
 
  private:
@@ -396,22 +395,66 @@ class BASE_EXPORT GlobalHistogramAllocator
   // Create a global allocator by memory-mapping a |file|. If the file does
   // not exist, it will be created with the specified |size|. If the file does
   // exist, the allocator will use and add to its contents, ignoring the passed
-  // size in favor of the existing size.
-  static void CreateWithFile(const FilePath& file_path,
+  // size in favor of the existing size. Returns whether the global allocator
+  // was set.
+  static bool CreateWithFile(const FilePath& file_path,
                              size_t size,
                              uint64_t id,
                              StringPiece name);
-#endif
 
-#if 0
-  // Create a global allocator using a block of shared |memory| of the
-  // specified |size|. The allocator takes ownership of the shared memory
-  // and releases it upon destruction, though the memory will continue to
-  // live if other processes have access to it.
-  static void CreateWithSharedMemory(std::unique_ptr<SharedMemory> memory,
-                                     size_t size,
-                                     uint64_t id,
-                                     StringPiece name);
+  // Creates a new file at |active_path|. If it already exists, it will first be
+  // moved to |base_path|. In all cases, any old file at |base_path| will be
+  // removed. If |spare_path| is non-empty and exists, that will be renamed and
+  // used as the active file. Otherwise, the file will be created using the
+  // given size, id, and name. Returns whether the global allocator was set.
+  static bool CreateWithActiveFile(const FilePath& base_path,
+                                   const FilePath& active_path,
+                                   const FilePath& spare_path,
+                                   size_t size,
+                                   uint64_t id,
+                                   StringPiece name);
+
+  // Uses ConstructBaseActivePairFilePaths() to build a pair of file names which
+  // are then used for CreateWithActiveFile(). |name| is used for both the
+  // internal name for the allocator and also for the name of the file inside
+  // |dir|.
+  static bool CreateWithActiveFileInDir(const FilePath& dir,
+                                        size_t size,
+                                        uint64_t id,
+                                        StringPiece name);
+
+  // Constructs a set of names in |dir| based on name that can be used for a
+  // base + active persistent memory mapped location for CreateWithActiveFile().
+  // The spare path is a file that can be pre-created and moved to be active
+  // without any startup penalty that comes from constructing the file. |name|
+  // will be used as the basename of the file inside |dir|. |out_base_path|,
+  // |out_active_path|, or |out_spare_path| may be null if not needed.
+  static void ConstructFilePaths(const FilePath& dir,
+                                 StringPiece name,
+                                 FilePath* out_base_path,
+                                 FilePath* out_active_path,
+                                 FilePath* out_spare_path);
+
+  // As above but puts the base files in a different "upload" directory. This
+  // is useful when moving all completed files into a single directory for easy
+  // upload management.
+  static void ConstructFilePathsForUploadDir(const FilePath& active_dir,
+                                             const FilePath& upload_dir,
+                                             const std::string& name,
+                                             FilePath* out_upload_path,
+                                             FilePath* out_active_path,
+                                             FilePath* out_spare_path);
+
+  // Create a "spare" file that can later be made the "active" file. This
+  // should be done on a background thread if possible.
+  static bool CreateSpareFile(const FilePath& spare_path, size_t size);
+
+  // Same as above but uses standard names. |name| is the name of the allocator
+  // and is also used to create the correct filename.
+  static bool CreateSpareFileInDir(const FilePath& dir_path,
+                                   size_t size,
+                                   StringPiece name);
+#endif
 
   // Create a global allocator using a block of shared memory accessed
   // through the given |handle| and |size|. The allocator takes ownership
@@ -419,7 +462,6 @@ class BASE_EXPORT GlobalHistogramAllocator
   // continue to live if other processes have access to it.
   static void CreateWithSharedMemoryHandle(const SharedMemoryHandle& handle,
                                            size_t size);
-#endif
 
   // Sets a GlobalHistogramAllocator for globally storing histograms in
   // a space that can be persisted or shared between processes. There is only
@@ -453,6 +495,10 @@ class BASE_EXPORT GlobalHistogramAllocator
   // indicates success.
   bool WriteToPersistentLocation();
 
+  // If there is a global metrics file being updated on disk, mark it to be
+  // deleted when the process exits.
+  void DeletePersistentLocation();
+
  private:
   friend class StatisticsRecorder;
 
@@ -467,6 +513,9 @@ class BASE_EXPORT GlobalHistogramAllocator
   // this method resumes from the last entry it saw; it costs nothing if
   // nothing new has been added.
   void ImportHistogramsToStatisticsRecorder();
+
+  // Builds a FilePath for a metrics file.
+  static FilePath MakeMetricsFilePath(const FilePath& dir, StringPiece name);
 
   // Import always continues from where it left off, making use of a single
   // iterator to continue the work.

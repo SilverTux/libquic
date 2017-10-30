@@ -42,7 +42,7 @@ class EnvironmentImpl : public Environment {
       alternate_case_var = ToLowerASCII(variable_name);
     else
       return false;
-    return GetVarImpl(alternate_case_var.c_str(), result);
+    return GetVarImpl(alternate_case_var, result);
   }
 
   bool SetVar(StringPiece variable_name,
@@ -136,7 +136,7 @@ Environment::~Environment() {}
 
 // static
 std::unique_ptr<Environment> Environment::Create() {
-  return MakeUnique<EnvironmentImpl>();
+  return std::make_unique<EnvironmentImpl>();
 }
 
 bool Environment::HasVar(StringPiece variable_name) {

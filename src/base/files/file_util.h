@@ -95,11 +95,26 @@ BASE_EXPORT bool ReplaceFile(const FilePath& from_path,
                              const FilePath& to_path,
                              File::Error* error);
 
-// Copies a single file. Use CopyDirectory to copy directories.
+// Copies a single file. Use CopyDirectory() to copy directories.
 // This function fails if either path contains traversal components ('..').
+// This function also fails if |to_path| is a directory.
 //
-// This function keeps the metadata on Windows. The read only bit on Windows is
-// not kept.
+// On POSIX, if |to_path| is a symlink, CopyFile() will follow the symlink. This
+// may have security implications. Use with care.
+//
+// If |to_path| already exists and is a regular file, it will be overwritten,
+// though its permissions will stay the same.
+//
+// If |to_path| does not exist, it will be created. The new file's permissions
+// varies per platform:
+//
+// - This function keeps the metadata on Windows. The read only bit is not kept.
+// - On Mac and iOS, |to_path| retains |from_path|'s permissions, except user
+//   read/write permissions are always set.
+// - On Linux and Android, |to_path| has user read/write permissions only. i.e.
+//   Always 0600.
+// - On ChromeOS, |to_path| has user read/write permissions and group/others
+//   read permissions. i.e. Always 0644.
 BASE_EXPORT bool CopyFile(const FilePath& from_path, const FilePath& to_path);
 
 // Copies the given path, and optionally all subdirectories and their contents
@@ -108,8 +123,7 @@ BASE_EXPORT bool CopyFile(const FilePath& from_path, const FilePath& to_path);
 // If there are files existing under to_path, always overwrite. Returns true
 // if successful, false otherwise. Wildcards on the names are not supported.
 //
-// This function calls into CopyFile() so the same behavior w.r.t. metadata
-// applies.
+// This function has the same metadata behavior as CopyFile().
 //
 // If you only need to copy a file use CopyFile, it's faster.
 BASE_EXPORT bool CopyDirectory(const FilePath& from_path,
@@ -165,6 +179,10 @@ BASE_EXPORT bool ReadFileToStringWithMaxSize(const FilePath& path,
 // Returns true iff |bytes| bytes have been successfully read from |fd|.
 BASE_EXPORT bool ReadFromFD(int fd, char* buffer, size_t bytes);
 
+// The following functions use POSIX functionality that isn't supported by
+// Fuchsia.
+#if !defined(OS_FUCHSIA)
+
 // Creates a symbolic link at |symlink| pointing to |target|.  Returns
 // false on failure.
 BASE_EXPORT bool CreateSymbolicLink(const FilePath& target,
@@ -205,6 +223,7 @@ BASE_EXPORT bool SetPosixFilePermissions(const FilePath& path, int mode);
 BASE_EXPORT bool ExecutableExistsInPath(Environment* env,
                                         const FilePath::StringType& executable);
 
+#endif  // !OS_FUCHSIA
 #endif  // OS_POSIX
 
 // Returns true if the given directory is empty
@@ -294,10 +313,6 @@ BASE_EXPORT bool DevicePathToDriveLetterPath(const FilePath& device_path,
 // be resolved with this function.
 BASE_EXPORT bool NormalizeToNativeFilePath(const FilePath& path,
                                            FilePath* nt_path);
-
-// Given an existing file in |path|, returns whether this file is on a network
-// drive or not. If |path| does not exist, this function returns false.
-BASE_EXPORT bool IsOnNetworkDrive(const base::FilePath& path);
 #endif
 
 // This function will return if the given file is a symlink or not.
@@ -311,7 +326,9 @@ BASE_EXPORT bool TouchFile(const FilePath& path,
                            const Time& last_accessed,
                            const Time& last_modified);
 
-// Wrapper for fopen-like calls. Returns non-NULL FILE* on success.
+// Wrapper for fopen-like calls. Returns non-NULL FILE* on success. The
+// underlying file descriptor (POSIX) or handle (Windows) is unconditionally
+// configured to not be propagated to child processes.
 BASE_EXPORT FILE* OpenFile(const FilePath& filename, const char* mode);
 
 // Closes file opened by OpenFile. Returns true on success.
@@ -365,6 +382,17 @@ BASE_EXPORT int GetUniquePathNumber(const FilePath& path,
 BASE_EXPORT bool SetNonBlocking(int fd);
 
 #if defined(OS_POSIX)
+// Creates a non-blocking, close-on-exec pipe.
+// This creates a non-blocking pipe that is not intended to be shared with any
+// child process. This will be done atomically if the operating system supports
+// it. Returns true if it was able to create the pipe, otherwise false.
+BASE_EXPORT bool CreateLocalNonBlockingPipe(int fds[2]);
+
+// Sets the given |fd| to close-on-exec mode.
+// Returns true if it was able to set it in the close-on-exec mode, otherwise
+// false.
+BASE_EXPORT bool SetCloseOnExec(int fd);
+
 // Test that |path| can only be changed by a given user and members of
 // a given set of groups.
 // Specifically, test that all parts of |path| under (and including) |base|:
@@ -397,7 +425,7 @@ BASE_EXPORT bool VerifyPathControlledByAdmin(const base::FilePath& path);
 // the directory |path|, in the number of FilePath::CharType, or -1 on failure.
 BASE_EXPORT int GetMaximumPathComponentLength(const base::FilePath& path);
 
-#if defined(OS_LINUX)
+#if defined(OS_LINUX) || defined(OS_AIX)
 // Broad categories of file systems as returned by statfs() on Linux.
 enum FileSystemType {
   FILE_SYSTEM_UNKNOWN,  // statfs failed.

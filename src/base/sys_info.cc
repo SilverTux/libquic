@@ -7,9 +7,7 @@
 #include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/lazy_instance.h"
-#if 0
 #include "base/metrics/field_trial.h"
-#endif
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/sys_info_internal.h"
@@ -17,10 +15,37 @@
 #include "build/build_config.h"
 
 namespace base {
+namespace {
+static const int kLowMemoryDeviceThresholdMB = 512;
+}
+
+// static
+int64_t SysInfo::AmountOfPhysicalMemory() {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kEnableLowEndDeviceMode)) {
+    return kLowMemoryDeviceThresholdMB * 1024 * 1024;
+  }
+
+  return AmountOfPhysicalMemoryImpl();
+}
+
+// static
+int64_t SysInfo::AmountOfAvailablePhysicalMemory() {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kEnableLowEndDeviceMode)) {
+    // Estimate the available memory by subtracting our memory used estimate
+    // from the fake |kLowMemoryDeviceThresholdMB| limit.
+    size_t memory_used =
+        AmountOfPhysicalMemoryImpl() - AmountOfAvailablePhysicalMemoryImpl();
+    size_t memory_limit = kLowMemoryDeviceThresholdMB * 1024 * 1024;
+    // std::min ensures no underflow, as |memory_used| can be > |memory_limit|.
+    return memory_limit - std::min(memory_used, memory_limit);
+  }
+
+  return AmountOfAvailablePhysicalMemoryImpl();
+}
 
 #if !defined(OS_ANDROID)
-
-static const int kLowMemoryDeviceThresholdMB = 512;
 
 bool DetectLowEndDevice() {
   CommandLine* command_line = CommandLine::ForCurrentProcess();
@@ -37,7 +62,6 @@ static LazyInstance<
   internal::LazySysInfoValue<bool, DetectLowEndDevice> >::Leaky
   g_lazy_low_end_device = LAZY_INSTANCE_INITIALIZER;
 
-#if 0
 // static
 bool SysInfo::IsLowEndDevice() {
   const std::string group_name =
@@ -51,9 +75,8 @@ bool SysInfo::IsLowEndDevice() {
   return g_lazy_low_end_device.Get().value();
 }
 #endif
-#endif
 
-#if (!defined(OS_MACOSX) || defined(OS_IOS)) && !defined(OS_ANDROID)
+#if !defined(OS_MACOSX) && !defined(OS_ANDROID)
 std::string SysInfo::HardwareModelName() {
   return std::string();
 }

@@ -16,16 +16,17 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <ostream>
 #include <string>
 #include <vector>
 
-#if defined(__GLIBCXX__)
+#if !defined(USE_SYMBOLIZE)
 #include <cxxabi.h>
 #endif
-#if !defined(__UCLIBC__)
+#if !defined(__UCLIBC__) && !defined(_AIX)
 #include <execinfo.h>
 #endif
 
@@ -33,8 +34,12 @@
 #include <AvailabilityMacros.h>
 #endif
 
-#include "base/debug/debugger.h"
+#if defined(OS_LINUX)
 #include "base/debug/proc_maps_linux.h"
+#endif
+
+#include "base/cfi_flags.h"
+#include "base/debug/debugger.h"
 #include "base/logging.h"
 #include "base/macros.h"
 #include "base/memory/free_deleter.h"
@@ -55,7 +60,9 @@ namespace {
 
 volatile sig_atomic_t in_signal_handler = 0;
 
-#if !defined(USE_SYMBOLIZE) && defined(__GLIBCXX__)
+bool (*try_handle_signal)(int, void*, void*) = nullptr;
+
+#if !defined(USE_SYMBOLIZE)
 // The prefix used for mangled symbols, per the Itanium C++ ABI:
 // http://www.codesourcery.com/cxx-abi/abi.html#mangling
 const char kMangledSymbolPrefix[] = "_Z";
@@ -64,7 +71,7 @@ const char kMangledSymbolPrefix[] = "_Z";
 // (('a'..'z').to_a+('A'..'Z').to_a+('0'..'9').to_a + ['_']).join
 const char kSymbolCharacters[] =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
-#endif  // !defined(USE_SYMBOLIZE) && defined(__GLIBCXX__)
+#endif  // !defined(USE_SYMBOLIZE)
 
 #if !defined(USE_SYMBOLIZE)
 // Demangles C++ symbols in the given text. Example:
@@ -76,8 +83,7 @@ void DemangleSymbols(std::string* text) {
   // Note: code in this function is NOT async-signal safe (std::string uses
   // malloc internally).
 
-#if defined(__GLIBCXX__) && !defined(__UCLIBC__)
-
+#if !defined(__UCLIBC__) && !defined(_AIX)
   std::string::size_type search_from = 0;
   while (search_from < text->size()) {
     // Look for the start of a mangled symbol, from search_from.
@@ -112,8 +118,7 @@ void DemangleSymbols(std::string* text) {
       search_from = mangled_start + 2;
     }
   }
-
-#endif  // defined(__GLIBCXX__) && !defined(__UCLIBC__)
+#endif  // !defined(__UCLIBC__) && !defined(_AIX)
 }
 #endif  // !defined(USE_SYMBOLIZE)
 
@@ -125,7 +130,7 @@ class BacktraceOutputHandler {
   virtual ~BacktraceOutputHandler() {}
 };
 
-#if !defined(__UCLIBC__)
+#if !defined(__UCLIBC__) && !defined(_AIX)
 void OutputPointer(void* pointer, BacktraceOutputHandler* handler) {
   // This should be more than enough to store a 64-bit number in hex:
   // 16 hex digits + 1 for null-terminator.
@@ -202,7 +207,7 @@ void ProcessBacktrace(void *const *trace,
   }
 #endif  // defined(USE_SYMBOLIZE)
 }
-#endif  // !defined(__UCLIBC__)
+#endif  // !defined(__UCLIBC__) && !defined(_AIX)
 
 void PrintToStderr(const char* output) {
   // NOTE: This code MUST be async-signal safe (it's used by in-process
@@ -213,6 +218,27 @@ void PrintToStderr(const char* output) {
 void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
   // NOTE: This code MUST be async-signal safe.
   // NO malloc or stdio is allowed here.
+
+  // Give a registered callback a chance to recover from this signal
+  //
+  // V8 uses guard regions to guarantee memory safety in WebAssembly. This means
+  // some signals might be expected if they originate from Wasm code while
+  // accessing the guard region. We give V8 the chance to handle and recover
+  // from these signals first.
+  if (try_handle_signal != nullptr &&
+      try_handle_signal(signal, info, void_context)) {
+    // The first chance handler took care of this. The SA_RESETHAND flag
+    // replaced this signal handler upon entry, but we want to stay
+    // installed. Thus, we reinstall ourselves before returning.
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_flags = SA_RESETHAND | SA_SIGINFO;
+    action.sa_sigaction = &StackDumpSignalHandler;
+    sigemptyset(&action.sa_mask);
+
+    sigaction(signal, &action, NULL);
+    return;
+  }
 
   // Record the fact that we are in the signal handler now, so that the rest
   // of StackTrace can behave in an async-signal-safe manner.
@@ -286,7 +312,7 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
   }
   PrintToStderr("\n");
 
-#if defined(CFI_ENFORCEMENT)
+#if BUILDFLAG(CFI_ENFORCEMENT_TRAP)
   if (signal == SIGILL && info->si_code == ILL_ILLOPN) {
     PrintToStderr(
         "CFI: Most likely a control flow integrity violation; for more "
@@ -294,7 +320,7 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
     PrintToStderr(
         "https://www.chromium.org/developers/testing/control-flow-integrity\n");
   }
-#endif
+#endif  // BUILDFLAG(CFI_ENFORCEMENT_TRAP)
 
   debug::StackTrace().Print();
 
@@ -380,6 +406,7 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
   // Non-Mac OSes should probably reraise the signal as well, but the Linux
   // sandbox tests break on CrOS devices.
   // https://code.google.com/p/chromium/issues/detail?id=551681
+  PrintToStderr("Calling _exit(1). Core file will not be generated.\n");
   _exit(1);
 #endif  // defined(OS_MACOSX) && !defined(OS_IOS)
 }
@@ -494,7 +521,7 @@ class SandboxSymbolizeHelper {
         if (strcmp((it->first).c_str(), file_path) == 0) {
           // POSIX.1-2004 requires an implementation to guarantee that dup()
           // is async-signal-safe.
-          fd = dup(it->second);
+          fd = HANDLE_EINTR(dup(it->second));
           break;
         }
       }
@@ -714,14 +741,21 @@ bool EnableInProcessStackDumping() {
   return success;
 }
 
-StackTrace::StackTrace() {
-  // NOTE: This code MUST be async-signal safe (it's used by in-process
-  // stack dumping signal handler). NO malloc or stdio is allowed here.
+void SetStackDumpFirstChanceCallback(bool (*handler)(int, void*, void*)) {
+  DCHECK(try_handle_signal == nullptr || handler == nullptr);
+  try_handle_signal = handler;
+}
 
-#if !defined(__UCLIBC__)
+StackTrace::StackTrace(size_t count) {
+// NOTE: This code MUST be async-signal safe (it's used by in-process
+// stack dumping signal handler). NO malloc or stdio is allowed here.
+
+#if !defined(__UCLIBC__) && !defined(_AIX)
+  count = std::min(arraysize(trace_), count);
+
   // Though the backtrace API man page does not list any possible negative
   // return values, we take no chance.
-  count_ = base::saturated_cast<size_t>(backtrace(trace_, arraysize(trace_)));
+  count_ = base::saturated_cast<size_t>(backtrace(trace_, count));
 #else
   count_ = 0;
 #endif
@@ -731,13 +765,13 @@ void StackTrace::Print() const {
   // NOTE: This code MUST be async-signal safe (it's used by in-process
   // stack dumping signal handler). NO malloc or stdio is allowed here.
 
-#if !defined(__UCLIBC__)
+#if !defined(__UCLIBC__) && !defined(_AIX)
   PrintBacktraceOutputHandler handler;
   ProcessBacktrace(trace_, count_, &handler);
 #endif
 }
 
-#if !defined(__UCLIBC__)
+#if !defined(__UCLIBC__) && !defined(_AIX)
 void StackTrace::OutputToStream(std::ostream* os) const {
   StreamBacktraceOutputHandler handler(os);
   ProcessBacktrace(trace_, count_, &handler);

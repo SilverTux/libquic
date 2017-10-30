@@ -4,30 +4,27 @@
 //
 // Some helpers for quic crypto
 
-#ifndef NET_QUIC_CRYPTO_CRYPTO_UTILS_H_
-#define NET_QUIC_CRYPTO_CRYPTO_UTILS_H_
+#ifndef NET_QUIC_CORE_CRYPTO_CRYPTO_UTILS_H_
+#define NET_QUIC_CORE_CRYPTO_CRYPTO_UTILS_H_
 
-#include <stddef.h>
-#include <stdint.h>
-
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "base/macros.h"
-#include "base/strings/string_piece.h"
-#include "net/base/net_export.h"
 #include "net/quic/core/crypto/crypto_handshake.h"
 #include "net/quic/core/crypto/crypto_handshake_message.h"
 #include "net/quic/core/crypto/crypto_protocol.h"
-#include "net/quic/core/quic_protocol.h"
+#include "net/quic/core/quic_packets.h"
 #include "net/quic/core/quic_time.h"
+#include "net/quic/platform/api/quic_export.h"
+#include "net/quic/platform/api/quic_string_piece.h"
 
 namespace net {
 
-class QuicTime;
 class QuicRandom;
-struct QuicCryptoNegotiatedParameters;
 
-class NET_EXPORT_PRIVATE CryptoUtils {
+class QUIC_EXPORT_PRIVATE CryptoUtils {
  public:
   // Diversification is a utility class that's used to act like a union type.
   // Values can be created by calling the functions like |NoDiversification|,
@@ -77,19 +74,8 @@ class NET_EXPORT_PRIVATE CryptoUtils {
   //   <20 bytes> random
   static void GenerateNonce(QuicWallTime now,
                             QuicRandom* random_generator,
-                            base::StringPiece orbit,
+                            QuicStringPiece orbit,
                             std::string* nonce);
-
-  // Returns true if the sni is valid, false otherwise.
-  //  (1) disallow IP addresses;
-  //  (2) check that the hostname contains valid characters only; and
-  //  (3) contains at least one dot.
-  static bool IsValidSNI(base::StringPiece sni);
-
-  // Convert hostname to lowercase and remove the trailing '.'.
-  // Returns |hostname|. NormalizeHostname() doesn't support IP address
-  // literals. IsValidSNI() should be called before calling NormalizeHostname().
-  static std::string NormalizeHostname(const char* hostname);
 
   // DeriveKeys populates |crypters->encrypter|, |crypters->decrypter|, and
   // |subkey_secret| (optional -- may be null) given the contents of
@@ -107,10 +93,10 @@ class NET_EXPORT_PRIVATE CryptoUtils {
   // decrypter will only be keyed to a preliminary state: a call to
   // |SetDiversificationNonce| with a diversification nonce will be needed to
   // complete keying.
-  static bool DeriveKeys(base::StringPiece premaster_secret,
+  static bool DeriveKeys(QuicStringPiece premaster_secret,
                          QuicTag aead,
-                         base::StringPiece client_nonce,
-                         base::StringPiece server_nonce,
+                         QuicStringPiece client_nonce,
+                         QuicStringPiece server_nonce,
                          const std::string& hkdf_input,
                          Perspective perspective,
                          Diversification diversification,
@@ -121,15 +107,15 @@ class NET_EXPORT_PRIVATE CryptoUtils {
   // dependent on |subkey_secret|, |label|, and |context|. Returns false if the
   // parameters are invalid (e.g. |label| contains null bytes); returns true on
   // success.
-  static bool ExportKeyingMaterial(base::StringPiece subkey_secret,
-                                   base::StringPiece label,
-                                   base::StringPiece context,
+  static bool ExportKeyingMaterial(QuicStringPiece subkey_secret,
+                                   QuicStringPiece label,
+                                   QuicStringPiece context,
                                    size_t result_len,
                                    std::string* result);
 
   // Computes the FNV-1a hash of the provided DER-encoded cert for use in the
   // XLCT tag.
-  static uint64_t ComputeLeafCertHash(const std::string& cert);
+  static uint64_t ComputeLeafCertHash(QuicStringPiece cert);
 
   // Validates that |server_hello| is actually an SHLO message and that it is
   // not part of a downgrade attack.
@@ -138,7 +124,7 @@ class NET_EXPORT_PRIVATE CryptoUtils {
   // code and sets |error_details|.
   static QuicErrorCode ValidateServerHello(
       const CryptoHandshakeMessage& server_hello,
-      const QuicVersionVector& negotiated_versions,
+      const QuicTransportVersionVector& negotiated_versions,
       std::string* error_details);
 
   // Validates that |client_hello| is actually a CHLO and that this is not part
@@ -149,8 +135,8 @@ class NET_EXPORT_PRIVATE CryptoUtils {
   // code and sets |error_details|.
   static QuicErrorCode ValidateClientHello(
       const CryptoHandshakeMessage& client_hello,
-      QuicVersion version,
-      const QuicVersionVector& supported_versions,
+      QuicTransportVersion version,
+      const QuicTransportVersionVector& supported_versions,
       std::string* error_details);
 
   // Returns the name of the HandshakeFailureReason as a char*
@@ -159,7 +145,8 @@ class NET_EXPORT_PRIVATE CryptoUtils {
 
   // Writes a hash of the serialized |message| into |output|.
   static void HashHandshakeMessage(const CryptoHandshakeMessage& message,
-                                   std::string* output);
+                                   std::string* output,
+                                   Perspective perspective);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(CryptoUtils);
@@ -167,4 +154,4 @@ class NET_EXPORT_PRIVATE CryptoUtils {
 
 }  // namespace net
 
-#endif  // NET_QUIC_CRYPTO_CRYPTO_UTILS_H_
+#endif  // NET_QUIC_CORE_CRYPTO_CRYPTO_UTILS_H_

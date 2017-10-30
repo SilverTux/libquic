@@ -4,13 +4,16 @@
 
 #include "base/message_loop/message_pump_default.h"
 
-#include <algorithm>
-
+#include "base/auto_reset.h"
 #include "base/logging.h"
 #include "base/threading/thread_restrictions.h"
 #include "build/build_config.h"
 
 #if defined(OS_MACOSX)
+#include <mach/thread_policy.h>
+
+#include "base/mac/mach_logging.h"
+#include "base/mac/scoped_mach_port.h"
 #include "base/mac/scoped_nsautorelease_pool.h"
 #endif
 
@@ -21,11 +24,10 @@ MessagePumpDefault::MessagePumpDefault()
       event_(WaitableEvent::ResetPolicy::AUTOMATIC,
              WaitableEvent::InitialState::NOT_SIGNALED) {}
 
-MessagePumpDefault::~MessagePumpDefault() {
-}
+MessagePumpDefault::~MessagePumpDefault() {}
 
 void MessagePumpDefault::Run(Delegate* delegate) {
-  DCHECK(keep_running_) << "Quit must have been called outside of Run!";
+  AutoReset<bool> auto_reset_keep_running(&keep_running_, true);
 
   for (;;) {
 #if defined(OS_MACOSX)
@@ -54,44 +56,15 @@ void MessagePumpDefault::Run(Delegate* delegate) {
     if (delayed_work_time_.is_null()) {
       event_.Wait();
     } else {
-      TimeDelta delay = delayed_work_time_ - TimeTicks::Now();
-      if (delay > TimeDelta()) {
-#if defined(OS_WIN)
-        // TODO(stanisc): crbug.com/623223: Consider moving the OS_WIN specific
-        // logic into TimedWait implementation in waitable_event_win.cc.
-
-        // crbug.com/487724: on Windows, waiting for less than 1 ms results in
-        // returning from TimedWait promptly and spinning
-        // MessagePumpDefault::Run loop for up to 1 ms - until it is time to
-        // run a delayed task. |min_delay| is the minimum possible wait to
-        // to avoid the spinning.
-        constexpr TimeDelta min_delay = TimeDelta::FromMilliseconds(1);
-        do {
-          delay = std::max(delay, min_delay);
-          if (event_.TimedWait(delay))
-            break;
-
-          // TimedWait can time out earlier than the specified |delay| on
-          // Windows. It doesn't make sense to run the outer loop in that case
-          // because there isn't going to be any new work. It is less overhead
-          // to just go back to wait.
-          // In practice this inner wait loop might have up to 3 iterations.
-          delay = delayed_work_time_ - TimeTicks::Now();
-        } while (delay > TimeDelta());
-#else
-        event_.TimedWait(delay);
-#endif
-      } else {
-        // It looks like delayed_work_time_ indicates a time in the past, so we
-        // need to call DoDelayedWork now.
-        delayed_work_time_ = TimeTicks();
-      }
+      // No need to handle already expired |delayed_work_time_| in any special
+      // way. When |delayed_work_time_| is in the past TimeWaitUntil returns
+      // promptly and |delayed_work_time_| will re-initialized on a next
+      // DoDelayedWork call which has to be called in order to get here again.
+      event_.TimedWaitUntil(delayed_work_time_);
     }
     // Since event_ is auto-reset, we don't need to do anything special here
     // other than service each delegate method.
   }
-
-  keep_running_ = true;
 }
 
 void MessagePumpDefault::Quit() {
@@ -111,5 +84,20 @@ void MessagePumpDefault::ScheduleDelayedWork(
   // record of how long to sleep when we do sleep.
   delayed_work_time_ = delayed_work_time;
 }
+
+#if defined(OS_MACOSX)
+void MessagePumpDefault::SetTimerSlack(TimerSlack timer_slack) {
+  thread_latency_qos_policy_data_t policy{};
+  policy.thread_latency_qos_tier = timer_slack == TIMER_SLACK_MAXIMUM
+                                       ? LATENCY_QOS_TIER_5
+                                       : LATENCY_QOS_TIER_UNSPECIFIED;
+  mac::ScopedMachSendRight thread_port(mach_thread_self());
+  kern_return_t kr =
+      thread_policy_set(thread_port.get(), THREAD_LATENCY_QOS_POLICY,
+                        reinterpret_cast<thread_policy_t>(&policy),
+                        THREAD_LATENCY_QOS_POLICY_COUNT);
+  MACH_DVLOG_IF(1, kr != KERN_SUCCESS, kr) << "thread_policy_set";
+}
+#endif
 
 }  // namespace base

@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 2.8.10)
+cmake_minimum_required (VERSION 2.8.11)
 
 # Defer enabling C and CXX languages.
 project (BoringSSL NONE)
@@ -9,14 +9,20 @@ if(WIN32)
   set(CMAKE_GENERATOR_CC cl)
 endif()
 
+include(sources.cmake)
+
 enable_language(C)
 enable_language(CXX)
 
 if(ANDROID)
   # Android-NDK CMake files reconfigure the path and so Go and Perl won't be
   # found. However, ninja will still find them in $PATH if we just name them.
-  set(PERL_EXECUTABLE "perl")
-  set(GO_EXECUTABLE "go")
+  if(NOT PERL_EXECUTABLE)
+    set(PERL_EXECUTABLE "perl")
+  endif()
+  if(NOT GO_EXECUTABLE)
+    set(GO_EXECUTABLE "go")
+  endif()
 else()
   find_package(Perl REQUIRED)
   find_program(GO_EXECUTABLE go)
@@ -26,22 +32,85 @@ if (NOT GO_EXECUTABLE)
   message(FATAL_ERROR "Could not find Go")
 endif()
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  set(C_CXX_FLAGS "-Wall -Werror -Wformat=2 -Wsign-compare -Wmissing-field-initializers -ggdb -fvisibility=hidden")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${C_CXX_FLAGS} -Wmissing-prototypes")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x ${C_CXX_FLAGS} -Wmissing-declarations")
+if (BORINGSSL_ALLOW_CXX_RUNTIME)
+  add_definitions(-DBORINGSSL_ALLOW_CXX_RUNTIME)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set(CLANG 1)
+endif()
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CLANG)
+  # Note clang-cl is odd and sets both CLANG and MSVC. We base our configuration
+  # primarily on our normal Clang one because the MSVC one is mostly
+  # suppressions for an overaggressive -Wall.
+  set(C_CXX_FLAGS "-Wall -Werror -Wformat=2 -Wsign-compare -Wmissing-field-initializers -Wwrite-strings")
+  if(MSVC)
+    # clang-cl sets different default warnings than clang.
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wno-unused-parameter -fmsc-version=1900")
+    # googletest suppresses warning C4996 via a pragma, but clang-cl does not
+    # honor it. Suppress it here to compensate. See https://crbug.com/772117.
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wno-deprecated-declarations")
+  else()
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -ggdb -fvisibility=hidden -fno-common")
+  endif()
+
+  if(CLANG)
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wnewline-eof -fcolor-diagnostics")
+  else()
+    # GCC (at least 4.8.4) has a bug where it'll find unreachable free() calls
+    # and declare that the code is trying to free a stack pointer.
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wno-free-nonheap-object")
+  endif()
+
+  if(CLANG OR NOT "7.0.0" VERSION_GREATER CMAKE_C_COMPILER_VERSION)
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wimplicit-fallthrough")
+  endif()
+
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${C_CXX_FLAGS} -Wmissing-prototypes -Wold-style-definition -Wstrict-prototypes")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${C_CXX_FLAGS} -Wmissing-declarations")
+
+  if(NOT MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+    if(APPLE)
+      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
+    endif()
+    if(NOT BORINGSSL_ALLOW_CXX_RUNTIME)
+      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
+    endif()
+  endif()
+
+  # In GCC, -Wmissing-declarations is the C++ spelling of -Wmissing-prototypes
+  # and using the wrong one is an error. In Clang, -Wmissing-prototypes is the
+  # spelling for both and -Wmissing-declarations is some other warning.
+  #
+  # https://gcc.gnu.org/onlinedocs/gcc-7.1.0/gcc/Warning-Options.html#Warning-Options
+  # https://clang.llvm.org/docs/DiagnosticsReference.html#wmissing-prototypes
+  # https://clang.llvm.org/docs/DiagnosticsReference.html#wmissing-declarations
+  if(CLANG)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wmissing-prototypes")
+  endif()
+
+  if(CMAKE_COMPILER_IS_GNUCXX AND "4.8" VERSION_GREATER CMAKE_C_COMPILER_VERSION)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-array-bounds")
+  endif()
+
 elseif(MSVC)
   set(MSVC_DISABLED_WARNINGS_LIST
+      "C4061" # enumerator 'identifier' in switch of enum 'enumeration' is not
+              # explicitly handled by a case label
+              # Disable this because it flags even when there is a default.
       "C4100" # 'exarg' : unreferenced formal parameter
       "C4127" # conditional expression is constant
       "C4200" # nonstandard extension used : zero-sized array in
               # struct/union.
+      "C4204" # nonstandard extension used: non-constant aggregate initializer
+      "C4221" # nonstandard extension used : 'identifier' : cannot be
+              # initialized using address of automatic variable
       "C4242" # 'function' : conversion from 'int' to 'uint8_t',
               # possible loss of data
       "C4244" # 'function' : conversion from 'int' to 'uint8_t',
               # possible loss of data
-      "C4245" # 'initializing' : conversion from 'long' to
-              # 'unsigned long', signed/unsigned mismatch
       "C4267" # conversion from 'size_t' to 'int', possible loss of data
       "C4371" # layout of class may have changed from a previous version of the
               # compiler due to better packing of member '...'
@@ -51,6 +120,7 @@ elseif(MSVC)
       "C4365" # '=' : conversion from 'size_t' to 'int',
               # signed/unsigned mismatch
       "C4389" # '!=' : signed/unsigned mismatch
+      "C4464" # relative include path contains '..'
       "C4510" # 'argument' : default constructor could not be generated
       "C4512" # 'argument' : assignment operator could not be generated
       "C4514" # 'function': unreferenced inline function has been removed
@@ -58,64 +128,79 @@ elseif(MSVC)
               # side-effect" caused by FD_* macros.
       "C4610" # struct 'argument' can never be instantiated - user defined
               # constructor required.
+      "C4623" # default constructor was implicitly defined as deleted
       "C4625" # copy constructor could not be generated because a base class
               # copy constructor is inaccessible or deleted
       "C4626" # assignment operator could not be generated because a base class
               # assignment operator is inaccessible or deleted
+      "C4668" # 'symbol' is not defined as a preprocessor macro, replacing with
+              # '0' for 'directives'
+              # Disable this because GTest uses it everywhere.
       "C4706" # assignment within conditional expression
       "C4710" # 'function': function not inlined
       "C4711" # function 'function' selected for inline expansion
       "C4800" # 'int' : forcing value to bool 'true' or 'false'
               # (performance warning)
       "C4820" # 'bytes' bytes padding added after construct 'member_name'
-      "C4996" # 'read': The POSIX name for this item is deprecated. Instead,
-              # use the ISO C++ conformant name: _read.
-     )
-  if(NOT(CMAKE_C_COMPILER_VERSION VERSION_LESS "19.0.23506"))
-    # MSVC 2015 Update 1.
-    set(MSVC_DISABLED_WARNINGS_LIST
-        ${MSVC_DISABLED_WARNINGS_LIST}
-        "C4464" # relative include path contains '..'
-        "C4623" # default constructor was implicitly defined as deleted
-        "C5027" # move assignment operator was implicitly defined as deleted
-       )
-    set(MSVC_LEVEL4_WARNINGS_LIST
-        # See https://connect.microsoft.com/VisualStudio/feedback/details/1217660/warning-c4265-when-using-functional-header
-        "C4265" # class has virtual functions, but destructor is not virtual
-        )
-    string(REPLACE "C" " -w4" MSVC_LEVEL4_WARNINGS_STR
-                              ${MSVC_LEVEL4_WARNINGS_LIST})
-  endif()
+      "C5026" # move constructor was implicitly defined as deleted
+      "C5027" # move assignment operator was implicitly defined as deleted
+      )
+  set(MSVC_LEVEL4_WARNINGS_LIST
+      # See https://connect.microsoft.com/VisualStudio/feedback/details/1217660/warning-c4265-when-using-functional-header
+      "C4265" # class has virtual functions, but destructor is not virtual
+      )
   string(REPLACE "C" " -wd" MSVC_DISABLED_WARNINGS_STR
                             ${MSVC_DISABLED_WARNINGS_LIST})
+  string(REPLACE "C" " -w4" MSVC_LEVEL4_WARNINGS_STR
+                            ${MSVC_LEVEL4_WARNINGS_LIST})
   set(CMAKE_C_FLAGS   "-Wall -WX ${MSVC_DISABLED_WARNINGS_STR} ${MSVC_LEVEL4_WARNINGS_STR}")
   set(CMAKE_CXX_FLAGS "-Wall -WX ${MSVC_DISABLED_WARNINGS_STR} ${MSVC_LEVEL4_WARNINGS_STR}")
+endif()
+
+if(WIN32)
   add_definitions(-D_HAS_EXCEPTIONS=0)
   add_definitions(-DWIN32_LEAN_AND_MEAN)
   add_definitions(-DNOMINMAX)
+  # Allow use of fopen.
+  add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+  # VS 2017 and higher supports STL-only warning suppressions.
+  add_definitions("-D_STL_EXTRA_DISABLED_WARNINGS=4774 4987")
 endif()
 
 if((CMAKE_COMPILER_IS_GNUCXX AND CMAKE_C_COMPILER_VERSION VERSION_GREATER "4.7.99") OR
-   CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+   CLANG)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wshadow")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wshadow")
 endif()
 
-if((CMAKE_COMPILER_IS_GNUCXX AND CMAKE_C_COMPILER_VERSION VERSION_GREATER "4.8.99") OR
-   CMAKE_CXX_COMPILER_ID MATCHES "Clang")
- set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c11 -D_XOPEN_SOURCE=700")
+if(CMAKE_COMPILER_IS_GNUCXX)
+  if ((CMAKE_C_COMPILER_VERSION VERSION_GREATER "4.8.99") OR CLANG)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c11")
+  else()
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
+  endif()
+endif()
+
+# pthread_rwlock_t requires a feature flag.
+if(NOT WIN32)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_XOPEN_SOURCE=700")
 endif()
 
 if(FUZZ)
-  if(!CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message("You need to build with Clang for fuzzing to work")
+  if(NOT CLANG)
+    message(FATAL_ERROR "You need to build with Clang for fuzzing to work")
   endif()
 
-  add_definitions(-DBORINGSSL_UNSAFE_FUZZER_MODE)
-  set(RUNNER_ARGS "-fuzzer")
+  add_definitions(-DBORINGSSL_UNSAFE_DETERMINISTIC_MODE)
+  set(RUNNER_ARGS "-deterministic")
 
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize-coverage=edge,indirect-calls,8bit-counters")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-coverage=edge,indirect-calls,8bit-counters")
+  if(NOT NO_FUZZER_MODE)
+    add_definitions(-DBORINGSSL_UNSAFE_FUZZER_MODE)
+    set(RUNNER_ARGS ${RUNNER_ARGS} "-fuzzer" "-shim-config" "fuzzer_mode.json")
+  endif()
+
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize-coverage=edge,indirect-calls,trace-pc-guard")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-coverage=edge,indirect-calls,trace-pc-guard")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
   link_directories(.)
 endif()
@@ -129,7 +214,64 @@ if (BUILD_SHARED_LIBS)
   set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 endif()
 
-if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
+if (MSAN)
+  if(NOT CLANG)
+    message(FATAL_ERROR "Cannot enable MSAN unless using Clang")
+  endif()
+
+  if (ASAN)
+    message(FATAL_ERROR "ASAN and MSAN are mutually exclusive")
+  endif()
+
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=memory -fsanitize-memory-track-origins -fno-omit-frame-pointer")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=memory -fsanitize-memory-track-origins -fno-omit-frame-pointer")
+  set(OPENSSL_NO_ASM "1")
+endif()
+
+if (ASAN)
+  if(NOT CLANG)
+    message(FATAL_ERROR "Cannot enable ASAN unless using Clang")
+  endif()
+
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer")
+  set(OPENSSL_NO_ASM "1")
+endif()
+
+if (GCOV)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
+endif()
+
+if(FIPS)
+  add_definitions(-DBORINGSSL_FIPS)
+  if(FIPS_BREAK_TEST)
+    add_definitions("-DBORINGSSL_FIPS_BREAK_${FIPS_BREAK_TEST}=1")
+  endif()
+  # Delocate does not work for ASan and MSan builds.
+  if(NOT ASAN AND NOT MSAN)
+    set(FIPS_DELOCATE "1")
+  endif()
+endif()
+
+# CMake's iOS support uses Apple's multiple-architecture toolchain. It takes an
+# architecture list from CMAKE_OSX_ARCHITECTURES, leaves CMAKE_SYSTEM_PROCESSOR
+# alone, and expects all architecture-specific logic to be conditioned within
+# the source files rather than the build. This does not work for our assembly
+# files, so we fix CMAKE_SYSTEM_PROCESSOR and only support single-architecture
+# builds.
+if (NOT OPENSSL_NO_ASM AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES NUM_ARCHES)
+  if (NOT ${NUM_ARCHES} EQUAL 1)
+    message(FATAL_ERROR "Universal binaries not supported.")
+  endif()
+  list(GET CMAKE_OSX_ARCHITECTURES 0 CMAKE_SYSTEM_PROCESSOR)
+endif()
+
+if (OPENSSL_NO_ASM)
+  add_definitions(-DOPENSSL_NO_ASM)
+  set(ARCH "generic")
+elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
   set(ARCH "x86_64")
 elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "amd64")
   set(ARCH "x86_64")
@@ -146,16 +288,17 @@ elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "i386")
   set(ARCH "x86")
 elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "i686")
   set(ARCH "x86")
-elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "arm")
-  set(ARCH "arm")
-elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "armv6")
-  set(ARCH "arm")
-elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "armv7-a")
-  set(ARCH "arm")
-elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "^armv*")
-  set(ARCH "arm")
 elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
   set(ARCH "aarch64")
+elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "arm64")
+  set(ARCH "aarch64")
+elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "^arm*")
+  set(ARCH "arm")
+elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "mips")
+  # Just to avoid the “unknown processor” error.
+  set(ARCH "generic")
+elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "ppc64le")
+  set(ARCH "ppc64le")
 else()
   message(FATAL_ERROR "Unknown processor:" ${CMAKE_SYSTEM_PROCESSOR})
 endif()
@@ -174,22 +317,42 @@ if (${ARCH} STREQUAL "x86" AND APPLE)
   set(ARCH "x86_64")
 endif()
 
-if (OPENSSL_NO_ASM)
-  add_definitions(-DOPENSSL_NO_ASM)
-  set(ARCH "generic")
-endif()
+# Add minimal googletest targets. The provided one has many side-effects, and
+# googletest has a very straightforward build.
+add_library(gtest third_party/googletest/src/gtest-all.cc)
+target_include_directories(gtest PRIVATE third_party/googletest)
+
+include_directories(third_party/googletest/include)
 
 # Declare a dummy target to build all unit tests. Test targets should inject
 # themselves as dependencies next to the target definition.
 add_custom_target(all_tests)
 
+add_custom_command(
+  OUTPUT crypto_test_data.cc
+  COMMAND ${GO_EXECUTABLE} run util/embed_test_data.go ${CRYPTO_TEST_DATA} >
+  ${CMAKE_CURRENT_BINARY_DIR}/crypto_test_data.cc
+  DEPENDS util/embed_test_data.go ${CRYPTO_TEST_DATA}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(crypto_test_data OBJECT crypto_test_data.cc)
+
 add_subdirectory(crypto)
 add_subdirectory(ssl)
 add_subdirectory(ssl/test)
+add_subdirectory(fipstools)
 add_subdirectory(tool)
 add_subdirectory(decrepit)
 
 if(FUZZ)
+  if(LIBFUZZER_FROM_DEPS)
+    file(GLOB LIBFUZZER_SOURCES "util/bot/libFuzzer/*.cpp")
+    add_library(Fuzzer STATIC ${LIBFUZZER_SOURCES})
+    # libFuzzer does not pass our aggressive warnings. It also must be built
+    # without -fsanitize-coverage options or clang crashes.
+    set_target_properties(Fuzzer PROPERTIES COMPILE_FLAGS "-Wno-shadow -Wno-format-nonliteral -Wno-missing-prototypes -fsanitize-coverage=0")
+  endif()
+
   add_subdirectory(fuzz)
 endif()
 
@@ -202,9 +365,9 @@ add_custom_target(
     run_tests
     COMMAND ${GO_EXECUTABLE} run util/all_tests.go -build-dir
             ${CMAKE_BINARY_DIR}
-    COMMAND cd ssl/test/runner
-    COMMAND ${GO_EXECUTABLE} test -shim-path $<TARGET_FILE:bssl_shim>
-            ${RUNNER_ARGS}
+    COMMAND cd ssl/test/runner &&
+            ${GO_EXECUTABLE} test -shim-path $<TARGET_FILE:bssl_shim>
+              ${RUNNER_ARGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     DEPENDS all_tests bssl_shim
     ${MAYBE_USES_TERMINAL})

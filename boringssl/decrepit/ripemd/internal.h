@@ -79,21 +79,21 @@ static void ripemd160_block_data_order(uint32_t h[5], const uint8_t *data,
   do {                         \
     unsigned long ll;          \
     ll = (c)->h[0];            \
-    (void)HOST_l2c(ll, (s));   \
+    HOST_l2c(ll, (s));         \
     ll = (c)->h[1];            \
-    (void)HOST_l2c(ll, (s));   \
+    HOST_l2c(ll, (s));         \
     ll = (c)->h[2];            \
-    (void)HOST_l2c(ll, (s));   \
+    HOST_l2c(ll, (s));         \
     ll = (c)->h[3];            \
-    (void)HOST_l2c(ll, (s));   \
+    HOST_l2c(ll, (s));         \
     ll = (c)->h[4];            \
-    (void)HOST_l2c(ll, (s));   \
+    HOST_l2c(ll, (s));         \
   } while (0)
 #define HASH_BLOCK_DATA_ORDER ripemd160_block_data_order
 
-#include "../../crypto/digest/md32_common.h"
+#include "../../crypto/fipsmodule/digest/md32_common.h"
 
-/* Transformed F2 and F4 are courtesy of Wei Dai <weidai@eskimo.com> */
+// Transformed F2 and F4 are courtesy of Wei Dai <weidai@eskimo.com>
 #define F1(x, y, z) ((x) ^ (y) ^ (z))
 #define F2(x, y, z) ((((y) ^ (z)) & (x)) ^ (z))
 #define F3(x, y, z) (((~(y)) | (x)) ^ (z))
@@ -487,7 +487,7 @@ static void ripemd160_block_data_order(uint32_t h[5], const uint8_t *data,
 
 
 #if defined(__cplusplus)
-}  /* extern C */
+}  // extern C
 #endif
 
-#endif  /* OPENSSL_HEADER_BN_INTERNAL_H */
+#endif  // OPENSSL_HEADER_BN_INTERNAL_H

@@ -105,7 +105,7 @@ class TraceBufferRingBuffer : public TraceBuffer {
 
   void EstimateTraceMemoryOverhead(
       TraceEventMemoryOverhead* overhead) override {
-    overhead->Add("TraceBufferRingBuffer", sizeof(*this));
+    overhead->Add(TraceEventMemoryOverhead::kTraceBuffer, sizeof(*this));
     for (size_t queue_index = queue_head_; queue_index != queue_tail_;
          queue_index = NextQueueIndex(queue_index)) {
       size_t chunk_index = recyclable_chunks_queue_[queue_index];
@@ -168,7 +168,8 @@ class TraceBufferVector : public TraceBuffer {
     // have to add the metadata events and flush thread-local buffers even if
     // the buffer is full.
     *index = chunks_.size();
-    chunks_.push_back(NULL);  // Put NULL in the slot of a in-flight chunk.
+    // Put nullptr in the slot of a in-flight chunk.
+    chunks_.push_back(nullptr);
     ++in_flight_chunk_count_;
     // + 1 because zero chunk_seq is not allowed.
     return std::unique_ptr<TraceBufferChunk>(
@@ -181,7 +182,7 @@ class TraceBufferVector : public TraceBuffer {
     DCHECK_LT(index, chunks_.size());
     DCHECK(!chunks_[index]);
     --in_flight_chunk_count_;
-    chunks_[index] = chunk.release();
+    chunks_[index] = std::move(chunk);
   }
 
   bool IsFull() const override { return chunks_.size() >= max_chunks_; }
@@ -198,7 +199,7 @@ class TraceBufferVector : public TraceBuffer {
   TraceEvent* GetEventByHandle(TraceEventHandle handle) override {
     if (handle.chunk_index >= chunks_.size())
       return NULL;
-    TraceBufferChunk* chunk = chunks_[handle.chunk_index];
+    TraceBufferChunk* chunk = chunks_[handle.chunk_index].get();
     if (!chunk || chunk->seq() != handle.chunk_seq)
       return NULL;
     return chunk->GetEventAt(handle.event_index);
@@ -207,7 +208,7 @@ class TraceBufferVector : public TraceBuffer {
   const TraceBufferChunk* NextChunk() override {
     while (current_iteration_index_ < chunks_.size()) {
       // Skip in-flight chunks.
-      const TraceBufferChunk* chunk = chunks_[current_iteration_index_++];
+      const TraceBufferChunk* chunk = chunks_[current_iteration_index_++].get();
       if (chunk)
         return chunk;
     }
@@ -220,10 +221,11 @@ class TraceBufferVector : public TraceBuffer {
         sizeof(*this) + max_chunks_ * sizeof(decltype(chunks_)::value_type);
     const size_t chunks_ptr_vector_resident_size =
         sizeof(*this) + chunks_.size() * sizeof(decltype(chunks_)::value_type);
-    overhead->Add("TraceBufferVector", chunks_ptr_vector_allocated_size,
+    overhead->Add(TraceEventMemoryOverhead::kTraceBuffer,
+                  chunks_ptr_vector_allocated_size,
                   chunks_ptr_vector_resident_size);
     for (size_t i = 0; i < chunks_.size(); ++i) {
-      TraceBufferChunk* chunk = chunks_[i];
+      TraceBufferChunk* chunk = chunks_[i].get();
       // Skip the in-flight (nullptr) chunks. They will be accounted by the
       // per-thread-local dumpers, see ThreadLocalEventBuffer::OnMemoryDump.
       if (chunk)
@@ -235,7 +237,7 @@ class TraceBufferVector : public TraceBuffer {
   size_t in_flight_chunk_count_;
   size_t current_iteration_index_;
   size_t max_chunks_;
-  ScopedVector<TraceBufferChunk> chunks_;
+  std::vector<std::unique_ptr<TraceBufferChunk>> chunks_;
 
   DISALLOW_COPY_AND_ASSIGN(TraceBufferVector);
 };
@@ -267,12 +269,13 @@ void TraceBufferChunk::EstimateTraceMemoryOverhead(
 
     // When estimating the size of TraceBufferChunk, exclude the array of trace
     // events, as they are computed individually below.
-    cached_overhead_estimate_->Add("TraceBufferChunk",
+    cached_overhead_estimate_->Add(TraceEventMemoryOverhead::kTraceBufferChunk,
                                    sizeof(*this) - sizeof(chunk_));
   }
 
   const size_t num_cached_estimated_events =
-      cached_overhead_estimate_->GetCount("TraceEvent");
+      cached_overhead_estimate_->GetCount(
+          TraceEventMemoryOverhead::kTraceEvent);
   DCHECK_LE(num_cached_estimated_events, size());
 
   if (IsFull() && num_cached_estimated_events == size()) {
@@ -290,7 +293,7 @@ void TraceBufferChunk::EstimateTraceMemoryOverhead(
     // changing as new TraceEvents are added to this chunk, so they are
     // computed on the fly.
     const size_t num_unused_trace_events = capacity() - size();
-    overhead->Add("TraceEvent (unused)",
+    overhead->Add(TraceEventMemoryOverhead::kUnusedTraceEvent,
                   num_unused_trace_events * sizeof(TraceEvent));
   }
 

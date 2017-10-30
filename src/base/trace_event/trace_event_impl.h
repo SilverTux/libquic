@@ -9,7 +9,6 @@
 #include <stdint.h>
 
 #include <memory>
-#include <stack>
 #include <string>
 #include <vector>
 
@@ -23,16 +22,11 @@
 #include "base/strings/string_util.h"
 #include "base/synchronization/condition_variable.h"
 #include "base/synchronization/lock.h"
-#include "base/threading/thread.h"
 #include "base/threading/thread_local.h"
 #include "base/trace_event/trace_event_memory_overhead.h"
 #include "build/build_config.h"
 
 namespace base {
-
-class WaitableEvent;
-class MessageLoop;
-
 namespace trace_event {
 
 typedef base::Callback<bool(const char* arg_name)> ArgumentNameFilterPredicate;
@@ -104,7 +98,7 @@ class BASE_EXPORT TraceEvent {
                   unsigned long long id,
                   unsigned long long bind_id,
                   int num_args,
-                  const char** arg_names,
+                  const char* const* arg_names,
                   const unsigned char* arg_types,
                   const unsigned long long* arg_values,
                   std::unique_ptr<ConvertableToTraceFormat>* convertable_values,

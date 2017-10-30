@@ -6,13 +6,14 @@
 
 #include <stddef.h>
 
+#include <unordered_map>
+
 #include "base/allocator/allocator_extension.h"
 #include "base/allocator/allocator_shim.h"
 #include "base/allocator/features.h"
 #include "base/debug/profiler.h"
 #include "base/trace_event/heap_profiler_allocation_context.h"
 #include "base/trace_event/heap_profiler_allocation_context_tracker.h"
-#include "base/trace_event/heap_profiler_allocation_register.h"
 #include "base/trace_event/heap_profiler_heap_dump_writer.h"
 #include "base/trace_event/process_memory_dump.h"
 #include "base/trace_event/trace_event_argument.h"
@@ -31,146 +32,149 @@ namespace base {
 namespace trace_event {
 
 namespace {
-#if BUILDFLAG(USE_EXPERIMENTAL_ALLOCATOR_SHIM)
+#if BUILDFLAG(USE_ALLOCATOR_SHIM)
 
 using allocator::AllocatorDispatch;
 
-void* HookAlloc(const AllocatorDispatch* self, size_t size) {
+void* HookAlloc(const AllocatorDispatch* self, size_t size, void* context) {
   const AllocatorDispatch* const next = self->next;
-  void* ptr = next->alloc_function(next, size);
+  void* ptr = next->alloc_function(next, size, context);
   if (ptr)
     MallocDumpProvider::GetInstance()->InsertAllocation(ptr, size);
   return ptr;
 }
 
-void* HookZeroInitAlloc(const AllocatorDispatch* self, size_t n, size_t size) {
+void* HookZeroInitAlloc(const AllocatorDispatch* self,
+                        size_t n,
+                        size_t size,
+                        void* context) {
   const AllocatorDispatch* const next = self->next;
-  void* ptr = next->alloc_zero_initialized_function(next, n, size);
+  void* ptr = next->alloc_zero_initialized_function(next, n, size, context);
   if (ptr)
     MallocDumpProvider::GetInstance()->InsertAllocation(ptr, n * size);
   return ptr;
 }
 
-void* HookllocAligned(const AllocatorDispatch* self,
-                      size_t alignment,
-                      size_t size) {
+void* HookAllocAligned(const AllocatorDispatch* self,
+                       size_t alignment,
+                       size_t size,
+                       void* context) {
   const AllocatorDispatch* const next = self->next;
-  void* ptr = next->alloc_aligned_function(next, alignment, size);
+  void* ptr = next->alloc_aligned_function(next, alignment, size, context);
   if (ptr)
     MallocDumpProvider::GetInstance()->InsertAllocation(ptr, size);
   return ptr;
 }
 
-void* HookRealloc(const AllocatorDispatch* self, void* address, size_t size) {
+void* HookRealloc(const AllocatorDispatch* self,
+                  void* address,
+                  size_t size,
+                  void* context) {
   const AllocatorDispatch* const next = self->next;
-  void* ptr = next->realloc_function(next, address, size);
+  void* ptr = next->realloc_function(next, address, size, context);
   MallocDumpProvider::GetInstance()->RemoveAllocation(address);
   if (size > 0)  // realloc(size == 0) means free().
     MallocDumpProvider::GetInstance()->InsertAllocation(ptr, size);
   return ptr;
 }
 
-void HookFree(const AllocatorDispatch* self, void* address) {
+void HookFree(const AllocatorDispatch* self, void* address, void* context) {
   if (address)
     MallocDumpProvider::GetInstance()->RemoveAllocation(address);
   const AllocatorDispatch* const next = self->next;
-  next->free_function(next, address);
+  next->free_function(next, address, context);
 }
 
-size_t HookGetSizeEstimate(const AllocatorDispatch* self, void* address) {
+size_t HookGetSizeEstimate(const AllocatorDispatch* self,
+                           void* address,
+                           void* context) {
   const AllocatorDispatch* const next = self->next;
-  return next->get_size_estimate_function(next, address);
+  return next->get_size_estimate_function(next, address, context);
+}
+
+unsigned HookBatchMalloc(const AllocatorDispatch* self,
+                         size_t size,
+                         void** results,
+                         unsigned num_requested,
+                         void* context) {
+  const AllocatorDispatch* const next = self->next;
+  unsigned count =
+      next->batch_malloc_function(next, size, results, num_requested, context);
+  for (unsigned i = 0; i < count; ++i) {
+    MallocDumpProvider::GetInstance()->InsertAllocation(results[i], size);
+  }
+  return count;
+}
+
+void HookBatchFree(const AllocatorDispatch* self,
+                   void** to_be_freed,
+                   unsigned num_to_be_freed,
+                   void* context) {
+  const AllocatorDispatch* const next = self->next;
+  for (unsigned i = 0; i < num_to_be_freed; ++i) {
+    MallocDumpProvider::GetInstance()->RemoveAllocation(to_be_freed[i]);
+  }
+  next->batch_free_function(next, to_be_freed, num_to_be_freed, context);
+}
+
+void HookFreeDefiniteSize(const AllocatorDispatch* self,
+                          void* ptr,
+                          size_t size,
+                          void* context) {
+  if (ptr)
+    MallocDumpProvider::GetInstance()->RemoveAllocation(ptr);
+  const AllocatorDispatch* const next = self->next;
+  next->free_definite_size_function(next, ptr, size, context);
 }
 
 AllocatorDispatch g_allocator_hooks = {
-    &HookAlloc,           /* alloc_function */
-    &HookZeroInitAlloc,   /* alloc_zero_initialized_function */
-    &HookllocAligned,     /* alloc_aligned_function */
-    &HookRealloc,         /* realloc_function */
-    &HookFree,            /* free_function */
-    &HookGetSizeEstimate, /* get_size_estimate_function */
-    nullptr,              /* next */
+    &HookAlloc,            /* alloc_function */
+    &HookZeroInitAlloc,    /* alloc_zero_initialized_function */
+    &HookAllocAligned,     /* alloc_aligned_function */
+    &HookRealloc,          /* realloc_function */
+    &HookFree,             /* free_function */
+    &HookGetSizeEstimate,  /* get_size_estimate_function */
+    &HookBatchMalloc,      /* batch_malloc_function */
+    &HookBatchFree,        /* batch_free_function */
+    &HookFreeDefiniteSize, /* free_definite_size_function */
+    nullptr,               /* next */
 };
-#endif  // BUILDFLAG(USE_EXPERIMENTAL_ALLOCATOR_SHIM)
+#endif  // BUILDFLAG(USE_ALLOCATOR_SHIM)
 
 #if defined(OS_WIN)
 // A structure containing some information about a given heap.
 struct WinHeapInfo {
-  HANDLE heap_id;
   size_t committed_size;
   size_t uncommitted_size;
   size_t allocated_size;
   size_t block_count;
 };
 
-bool GetHeapInformation(WinHeapInfo* heap_info,
-                        const std::set<void*>& block_to_skip) {
-  CHECK(::HeapLock(heap_info->heap_id) == TRUE);
-  PROCESS_HEAP_ENTRY heap_entry;
-  heap_entry.lpData = nullptr;
-  // Walk over all the entries in this heap.
-  while (::HeapWalk(heap_info->heap_id, &heap_entry) != FALSE) {
-    if (block_to_skip.count(heap_entry.lpData) == 1)
-      continue;
-    if ((heap_entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) != 0) {
-      heap_info->allocated_size += heap_entry.cbData;
-      heap_info->block_count++;
-    } else if ((heap_entry.wFlags & PROCESS_HEAP_REGION) != 0) {
-      heap_info->committed_size += heap_entry.Region.dwCommittedSize;
-      heap_info->uncommitted_size += heap_entry.Region.dwUnCommittedSize;
-    }
-  }
-  CHECK(::HeapUnlock(heap_info->heap_id) == TRUE);
-  return true;
-}
-
-void WinHeapMemoryDumpImpl(WinHeapInfo* all_heap_info) {
-// This method might be flaky for 2 reasons:
-//   - GetProcessHeaps is racy by design. It returns a snapshot of the
-//     available heaps, but there's no guarantee that that snapshot remains
-//     valid. If a heap disappears between GetProcessHeaps() and HeapWalk()
-//     then chaos should be assumed. This flakyness is acceptable for tracing.
-//   - The MSDN page for HeapLock says: "If the HeapLock function is called on
-//     a heap created with the HEAP_NO_SERIALIZATION flag, the results are
-//     undefined."
-//   - Note that multiple heaps occur on Windows primarily because system and
-//     3rd party DLLs will each create their own private heap. It's possible to
-//     retrieve the heap the CRT allocates from and report specifically on that
-//     heap. It's interesting to report all heaps, as e.g. loading or invoking
-//     on a Windows API may consume memory from a private heap.
+// NOTE: crbug.com/665516
+// Unfortunately, there is no safe way to collect information from secondary
+// heaps due to limitations and racy nature of this piece of WinAPI.
+void WinHeapMemoryDumpImpl(WinHeapInfo* crt_heap_info) {
 #if defined(SYZYASAN)
   if (base::debug::IsBinaryInstrumented())
     return;
 #endif
 
-  // Retrieves the number of heaps in the current process.
-  DWORD number_of_heaps = ::GetProcessHeaps(0, NULL);
-
-  // Try to retrieve a handle to all the heaps owned by this process. Returns
-  // false if the number of heaps has changed.
-  //
-  // This is inherently racy as is, but it's not something that we observe a lot
-  // in Chrome, the heaps tend to be created at startup only.
-  std::unique_ptr<HANDLE[]> all_heaps(new HANDLE[number_of_heaps]);
-  if (::GetProcessHeaps(number_of_heaps, all_heaps.get()) != number_of_heaps)
-    return;
-
-  // Skip the pointer to the heap array to avoid accounting the memory used by
-  // this dump provider.
-  std::set<void*> block_to_skip;
-  block_to_skip.insert(all_heaps.get());
-
-  // Retrieves some metrics about each heap.
-  for (size_t i = 0; i < number_of_heaps; ++i) {
-    WinHeapInfo heap_info = {0};
-    heap_info.heap_id = all_heaps[i];
-    GetHeapInformation(&heap_info, block_to_skip);
-
-    all_heap_info->allocated_size += heap_info.allocated_size;
-    all_heap_info->committed_size += heap_info.committed_size;
-    all_heap_info->uncommitted_size += heap_info.uncommitted_size;
-    all_heap_info->block_count += heap_info.block_count;
+  // Iterate through whichever heap our CRT is using.
+  HANDLE crt_heap = reinterpret_cast<HANDLE>(_get_heap_handle());
+  ::HeapLock(crt_heap);
+  PROCESS_HEAP_ENTRY heap_entry;
+  heap_entry.lpData = nullptr;
+  // Walk over all the entries in the main heap.
+  while (::HeapWalk(crt_heap, &heap_entry) != FALSE) {
+    if ((heap_entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) != 0) {
+      crt_heap_info->allocated_size += heap_entry.cbData;
+      crt_heap_info->block_count++;
+    } else if ((heap_entry.wFlags & PROCESS_HEAP_REGION) != 0) {
+      crt_heap_info->committed_size += heap_entry.Region.dwCommittedSize;
+      crt_heap_info->uncommitted_size += heap_entry.Region.dwUnCommittedSize;
+    }
   }
+  CHECK(::HeapUnlock(crt_heap) == TRUE);
 }
 #endif  // defined(OS_WIN)
 }  // namespace
@@ -185,7 +189,7 @@ MallocDumpProvider* MallocDumpProvider::GetInstance() {
 }
 
 MallocDumpProvider::MallocDumpProvider()
-    : heap_profiler_enabled_(false), tid_dumping_heap_(kInvalidThreadId) {}
+    : tid_dumping_heap_(kInvalidThreadId) {}
 
 MallocDumpProvider::~MallocDumpProvider() {}
 
@@ -213,24 +217,32 @@ bool MallocDumpProvider::OnMemoryDump(const MemoryDumpArgs& args,
   total_virtual_size = stats.size_allocated;
   allocated_objects_size = stats.size_in_use;
 
-  // The resident size is approximated to the max size in use, which would count
-  // the total size of all regions other than the free bytes at the end of each
-  // region. In each allocation region the allocations are rounded off to a
-  // fixed quantum, so the excess region will not be resident.
-  // See crrev.com/1531463004 for detailed explanation.
-  resident_size = stats.max_size_in_use;
+  // Resident size is approximated pretty well by stats.max_size_in_use.
+  // However, on macOS, freed blocks are both resident and reusable, which is
+  // semantically equivalent to deallocated. The implementation of libmalloc
+  // will also only hold a fixed number of freed regions before actually
+  // starting to deallocate them, so stats.max_size_in_use is also not
+  // representative of the peak size. As a result, stats.max_size_in_use is
+  // typically somewhere between actually resident [non-reusable] pages, and
+  // peak size. This is not very useful, so we just use stats.size_in_use for
+  // resident_size, even though it's an underestimate and fails to account for
+  // fragmentation. See
+  // https://bugs.chromium.org/p/chromium/issues/detail?id=695263#c1.
+  resident_size = stats.size_in_use;
 #elif defined(OS_WIN)
-  WinHeapInfo all_heap_info = {};
-  WinHeapMemoryDumpImpl(&all_heap_info);
+  WinHeapInfo main_heap_info = {};
+  WinHeapMemoryDumpImpl(&main_heap_info);
   total_virtual_size =
-      all_heap_info.committed_size + all_heap_info.uncommitted_size;
+      main_heap_info.committed_size + main_heap_info.uncommitted_size;
   // Resident size is approximated with committed heap size. Note that it is
   // possible to do this with better accuracy on windows by intersecting the
   // working set with the virtual memory ranges occuipied by the heap. It's not
   // clear that this is worth it, as it's fairly expensive to do.
-  resident_size = all_heap_info.committed_size;
-  allocated_objects_size = all_heap_info.allocated_size;
-  allocated_objects_count = all_heap_info.block_count;
+  resident_size = main_heap_info.committed_size;
+  allocated_objects_size = main_heap_info.allocated_size;
+  allocated_objects_count = main_heap_info.block_count;
+#elif defined(OS_FUCHSIA)
+// TODO(fuchsia): Port, see https://crbug.com/706592.
 #else
   struct mallinfo info = mallinfo();
   DCHECK_GE(info.arena + info.hblkhd, info.uordblks);
@@ -273,34 +285,31 @@ bool MallocDumpProvider::OnMemoryDump(const MemoryDumpArgs& args,
   }
 
   // Heap profiler dumps.
-  if (!heap_profiler_enabled_)
+  if (!allocation_register_.is_enabled())
     return true;
-
-  // The dumps of the heap profiler should be created only when heap profiling
-  // was enabled (--enable-heap-profiling) AND a DETAILED dump is requested.
-  // However, when enabled, the overhead of the heap profiler should be always
-  // reported to avoid oscillations of the malloc total in LIGHT dumps.
 
   tid_dumping_heap_ = PlatformThread::CurrentId();
   // At this point the Insert/RemoveAllocation hooks will ignore this thread.
-  // Enclosing all the temporariy data structures in a scope, so that the heap
-  // profiler does not see unabalanced malloc/free calls from these containers.
+  // Enclosing all the temporary data structures in a scope, so that the heap
+  // profiler does not see unbalanced malloc/free calls from these containers.
   {
     TraceEventMemoryOverhead overhead;
-    hash_map<AllocationContext, AllocationMetrics> metrics_by_context;
-    {
-      AutoLock lock(allocation_register_lock_);
-      if (allocation_register_) {
-        if (args.level_of_detail == MemoryDumpLevelOfDetail::DETAILED) {
-          for (const auto& alloc_size : *allocation_register_) {
-            AllocationMetrics& metrics = metrics_by_context[alloc_size.context];
-            metrics.size += alloc_size.size;
-            metrics.count++;
-          }
-        }
-        allocation_register_->EstimateTraceMemoryOverhead(&overhead);
-      }
-    }  // lock(allocation_register_lock_)
+    std::unordered_map<AllocationContext, AllocationMetrics> metrics_by_context;
+    if (AllocationContextTracker::capture_mode() !=
+        AllocationContextTracker::CaptureMode::DISABLED) {
+      ShardedAllocationRegister::OutputMetrics shim_metrics =
+          allocation_register_.UpdateAndReturnsMetrics(metrics_by_context);
+
+      // Aggregate data for objects allocated through the shim.
+      inner_dump->AddScalar("shim_allocated_objects_size",
+                            MemoryAllocatorDump::kUnitsBytes,
+                            shim_metrics.size);
+      inner_dump->AddScalar("shim_allocator_object_count",
+                            MemoryAllocatorDump::kUnitsObjects,
+                            shim_metrics.count);
+    }
+    allocation_register_.EstimateTraceMemoryOverhead(&overhead);
+
     pmd->DumpHeapUsage(metrics_by_context, overhead, "malloc");
   }
   tid_dumping_heap_ = kInvalidThreadId;
@@ -309,22 +318,14 @@ bool MallocDumpProvider::OnMemoryDump(const MemoryDumpArgs& args,
 }
 
 void MallocDumpProvider::OnHeapProfilingEnabled(bool enabled) {
-#if BUILDFLAG(USE_EXPERIMENTAL_ALLOCATOR_SHIM)
+#if BUILDFLAG(USE_ALLOCATOR_SHIM)
   if (enabled) {
-    {
-      AutoLock lock(allocation_register_lock_);
-      allocation_register_.reset(new AllocationRegister());
-    }
+    allocation_register_.SetEnabled();
     allocator::InsertAllocatorDispatch(&g_allocator_hooks);
   } else {
-    AutoLock lock(allocation_register_lock_);
-    allocation_register_.reset();
-    // Insert/RemoveAllocation below will no-op if the register is torn down.
-    // Once disabled, heap profiling will not re-enabled anymore for the
-    // lifetime of the process.
+    allocation_register_.SetDisabled();
   }
 #endif
-  heap_profiler_enabled_ = enabled;
 }
 
 void MallocDumpProvider::InsertAllocation(void* address, size_t size) {
@@ -341,13 +342,15 @@ void MallocDumpProvider::InsertAllocation(void* address, size_t size) {
   auto* tracker = AllocationContextTracker::GetInstanceForCurrentThread();
   if (!tracker)
     return;
-  AllocationContext context = tracker->GetContextSnapshot();
 
-  AutoLock lock(allocation_register_lock_);
-  if (!allocation_register_)
+  AllocationContext context;
+  if (!tracker->GetContextSnapshot(&context))
     return;
 
-  allocation_register_->Insert(address, size, context);
+  if (!allocation_register_.is_enabled())
+    return;
+
+  allocation_register_.Insert(address, size, context);
 }
 
 void MallocDumpProvider::RemoveAllocation(void* address) {
@@ -356,10 +359,9 @@ void MallocDumpProvider::RemoveAllocation(void* address) {
   if (tid_dumping_heap_ != kInvalidThreadId &&
       tid_dumping_heap_ == PlatformThread::CurrentId())
     return;
-  AutoLock lock(allocation_register_lock_);
-  if (!allocation_register_)
+  if (!allocation_register_.is_enabled())
     return;
-  allocation_register_->Remove(address);
+  allocation_register_.Remove(address);
 }
 
 }  // namespace trace_event

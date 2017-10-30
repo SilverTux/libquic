@@ -10,13 +10,10 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#if 0
 #include "base/files/file_util.h"
-#else
-#include "base/posix/eintr_wrapper.h"
-#endif
 #include "base/lazy_instance.h"
 #include "base/logging.h"
+#include "base/posix/eintr_wrapper.h"
 
 namespace {
 
@@ -26,9 +23,17 @@ namespace {
 // we can use LazyInstance to handle opening it on the first access.
 class URandomFd {
  public:
-  URandomFd() : fd_(open("/dev/urandom", O_RDONLY)) {
+#if defined(OS_AIX)
+  // AIX has no 64-bit support for open falgs such as -
+  //  O_CLOEXEC, O_NOFOLLOW and O_TTY_INIT
+  URandomFd() : fd_(HANDLE_EINTR(open("/dev/urandom", O_RDONLY))) {
     DCHECK_GE(fd_, 0) << "Cannot open /dev/urandom: " << errno;
   }
+#else
+  URandomFd() : fd_(HANDLE_EINTR(open("/dev/urandom", O_RDONLY | O_CLOEXEC))) {
+    DCHECK_GE(fd_, 0) << "Cannot open /dev/urandom: " << errno;
+  }
+#endif
 
   ~URandomFd() { close(fd_); }
 
@@ -43,29 +48,6 @@ base::LazyInstance<URandomFd>::Leaky g_urandom_fd = LAZY_INSTANCE_INITIALIZER;
 }  // namespace
 
 namespace base {
-
-// NOTE: This function must be cryptographically secure. http://crbug.com/140076
-uint64_t RandUint64() {
-  uint64_t number;
-  RandBytes(&number, sizeof(number));
-  return number;
-}
-
-// ReadFromFD is originally defined in base/files/file_util.h
-// libquic removed base/files/file_util.h dependency and copied the function
-// here. Use static to avoid linker conflict in other projects using libquic
-// along with chromium sources.
-static bool ReadFromFD(int fd, char* buffer, size_t bytes) {
-  size_t total_read = 0;
-  while (total_read < bytes) {
-    ssize_t bytes_read =
-        HANDLE_EINTR(read(fd, buffer + total_read, bytes - total_read));
-    if (bytes_read <= 0)
-      break;
-    total_read += bytes_read;
-  }
-  return total_read == bytes;
-}
 
 void RandBytes(void* output, size_t output_length) {
   const int urandom_fd = g_urandom_fd.Pointer()->fd();

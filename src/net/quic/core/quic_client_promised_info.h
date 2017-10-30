@@ -2,24 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef NET_QUIC_QUIC_CLIENT_PROMISED_INFO_H_
-#define NET_QUIC_QUIC_CLIENT_PROMISED_INFO_H_
+#ifndef NET_QUIC_CORE_QUIC_CLIENT_PROMISED_INFO_H_
+#define NET_QUIC_CORE_QUIC_CLIENT_PROMISED_INFO_H_
 
-#include <sys/types.h>
 #include <string>
+#include <sys/types.h>
 
 #include "net/quic/core/quic_alarm.h"
 #include "net/quic/core/quic_client_push_promise_index.h"
-#include "net/quic/core/quic_client_session_base.h"
-#include "net/quic/core/quic_protocol.h"
+#include "net/quic/core/quic_packets.h"
+#include "net/quic/core/quic_spdy_client_session_base.h"
 #include "net/quic/core/quic_spdy_stream.h"
-#include "net/spdy/spdy_framer.h"
+#include "net/quic/platform/api/quic_export.h"
+#include "net/spdy/core/spdy_framer.h"
 
 namespace net {
-
-class QuicClientSessionBase;
-class QuicDataToResend;
-class QuicConnectionHelperInterface;
 
 namespace test {
 class QuicClientPromisedInfoPeer;
@@ -29,11 +26,11 @@ class QuicClientPromisedInfoPeer;
 // stream from the time a PUSH_PROMISE is received until rendezvous
 // between the promised response and the corresponding client request
 // is complete.
-class NET_EXPORT_PRIVATE QuicClientPromisedInfo
+class QUIC_EXPORT_PRIVATE QuicClientPromisedInfo
     : public QuicClientPushPromiseIndex::TryHandle {
  public:
   // Interface to QuicSpdyClientStream
-  QuicClientPromisedInfo(QuicClientSessionBase* session,
+  QuicClientPromisedInfo(QuicSpdyClientSessionBase* session,
                          QuicStreamId id,
                          std::string url);
   virtual ~QuicClientPromisedInfo();
@@ -61,7 +58,7 @@ class NET_EXPORT_PRIVATE QuicClientPromisedInfo
   // uing the |promised_by_url| map.  The push can be cross-origin, so
   // the client should validate that the session is authoritative for
   // the promised URL.  If not, it should call |RejectUnauthorized|.
-  QuicClientSessionBase* session() { return session_; }
+  QuicSpdyClientSessionBase* session() { return session_; }
 
   // If the promised response contains Vary header, then the fields
   // specified by Vary must match between the client request header
@@ -76,6 +73,9 @@ class NET_EXPORT_PRIVATE QuicClientPromisedInfo
   QuicStreamId id() const { return id_; }
 
   const std::string url() const { return url_; }
+
+  // Return true if there's a request pending matching this push promise.
+  bool is_validating() const { return client_request_delegate_ != nullptr; }
 
  private:
   friend class test::QuicClientPromisedInfoPeer;
@@ -92,7 +92,7 @@ class NET_EXPORT_PRIVATE QuicClientPromisedInfo
 
   QuicAsyncStatus FinalValidation();
 
-  QuicClientSessionBase* session_;
+  QuicSpdyClientSessionBase* session_;
   QuicStreamId id_;
   std::string url_;
   std::unique_ptr<SpdyHeaderBlock> request_headers_;
@@ -109,4 +109,4 @@ class NET_EXPORT_PRIVATE QuicClientPromisedInfo
 
 }  // namespace net
 
-#endif  // NET_QUIC_QUIC_CLIENT_PROMISED_INFO_H_
+#endif  // NET_QUIC_CORE_QUIC_CLIENT_PROMISED_INFO_H_

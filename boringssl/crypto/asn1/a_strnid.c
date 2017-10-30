@@ -62,6 +62,9 @@
 #include <openssl/err.h>
 #include <openssl/mem.h>
 #include <openssl/obj.h>
+#include <openssl/stack.h>
+
+DEFINE_STACK_OF(ASN1_STRING_TABLE)
 
 static STACK_OF(ASN1_STRING_TABLE) *stable = NULL;
 static void st_free(ASN1_STRING_TABLE *tbl);
@@ -247,6 +250,7 @@ int ASN1_STRING_TABLE_add(int nid,
         }
         tmp->flags = flags | STABLE_FLAGS_MALLOC;
         tmp->nid = nid;
+        tmp->minsize = tmp->maxsize = -1;
         new_nid = 1;
     } else
         tmp->flags = (tmp->flags & STABLE_FLAGS_MALLOC) | flags;

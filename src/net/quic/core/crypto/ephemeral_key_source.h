@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef NET_QUIC_CRYPTO_EPHEMERAL_KEY_SOURCE_H_
-#define NET_QUIC_CRYPTO_EPHEMERAL_KEY_SOURCE_H_
+#ifndef NET_QUIC_CORE_CRYPTO_EPHEMERAL_KEY_SOURCE_H_
+#define NET_QUIC_CORE_CRYPTO_EPHEMERAL_KEY_SOURCE_H_
 
 #include <string>
 
-#include "base/strings/string_piece.h"
-#include "net/base/net_export.h"
 #include "net/quic/core/quic_time.h"
+#include "net/quic/platform/api/quic_export.h"
+#include "net/quic/platform/api/quic_string_piece.h"
 
 namespace net {
 
@@ -20,7 +20,7 @@ class QuicRandom;
 // for several connections in a short space of time. Since the implementation
 // of this may involve locking or thread-local data, this interface abstracts
 // that away.
-class NET_EXPORT_PRIVATE EphemeralKeySource {
+class QUIC_EXPORT_PRIVATE EphemeralKeySource {
  public:
   virtual ~EphemeralKeySource() {}
 
@@ -33,10 +33,10 @@ class NET_EXPORT_PRIVATE EphemeralKeySource {
       const KeyExchange* key_exchange,
       QuicRandom* rand,
       QuicTime now,
-      base::StringPiece peer_public_value,
+      QuicStringPiece peer_public_value,
       std::string* public_value) = 0;
 };
 
 }  // namespace net
 
-#endif  // NET_QUIC_CRYPTO_EPHEMERAL_KEY_SOURCE_H_
+#endif  // NET_QUIC_CORE_CRYPTO_EPHEMERAL_KEY_SOURCE_H_

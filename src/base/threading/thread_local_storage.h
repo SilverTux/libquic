@@ -5,6 +5,8 @@
 #ifndef BASE_THREADING_THREAD_LOCAL_STORAGE_H_
 #define BASE_THREADING_THREAD_LOCAL_STORAGE_H_
 
+#include <stdint.h>
+
 #include "base/atomicops.h"
 #include "base/base_export.h"
 #include "base/macros.h"
@@ -20,9 +22,12 @@ namespace base {
 
 namespace internal {
 
-// WARNING: You should *NOT* be using this class directly.
-// PlatformThreadLocalStorage is low-level abstraction to the OS's TLS
-// interface, you should instead be using ThreadLocalStorage::StaticSlot/Slot.
+// WARNING: You should *NOT* use this class directly.
+// PlatformThreadLocalStorage is a low-level abstraction of the OS's TLS
+// interface. Instead, you should use one of the following:
+// * ThreadLocalBoolean (from thread_local.h) for booleans.
+// * ThreadLocalPointer (from thread_local.h) for pointers.
+// * ThreadLocalStorage::StaticSlot/Slot for more direct control of the slot.
 class BASE_EXPORT PlatformThreadLocalStorage {
  public:
 
@@ -51,7 +56,13 @@ class BASE_EXPORT PlatformThreadLocalStorage {
   // SetTLSValue().
   static void FreeTLS(TLSKey key);
   static void SetTLSValue(TLSKey key, void* value);
-  static void* GetTLSValue(TLSKey key);
+  static void* GetTLSValue(TLSKey key) {
+#if defined(OS_WIN)
+    return TlsGetValue(key);
+#elif defined(OS_POSIX)
+    return pthread_getspecific(key);
+#endif
+  }
 
   // Each platform (OS implementation) is required to call this method on each
   // terminating thread when the thread is about to terminate.  This method
@@ -86,9 +97,7 @@ class BASE_EXPORT ThreadLocalStorage {
   typedef void (*TLSDestructorFunc)(void* value);
 
   // StaticSlot uses its own struct initializer-list style static
-  // initialization, as base's LINKER_INITIALIZED requires a constructor and on
-  // some compilers (notably gcc 4.4) this still ends up needing runtime
-  // initialization.
+  // initialization, which does not require a constructor.
   #define TLS_INITIALIZER {0}
 
   // A key representing one value stored in TLS.
@@ -123,6 +132,7 @@ class BASE_EXPORT ThreadLocalStorage {
     // The internals of this struct should be considered private.
     base::subtle::Atomic32 initialized_;
     int slot_;
+    uint32_t version_;
   };
 
   // A convenience wrapper around StaticSlot with a constructor. Can be used

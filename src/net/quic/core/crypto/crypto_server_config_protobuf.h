@@ -2,33 +2,33 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef NET_QUIC_CRYPTO_CRYPTO_SERVER_CONFIG_PROTOBUF_H_
-#define NET_QUIC_CRYPTO_CRYPTO_SERVER_CONFIG_PROTOBUF_H_
+#ifndef NET_QUIC_CORE_CRYPTO_CRYPTO_SERVER_CONFIG_PROTOBUF_H_
+#define NET_QUIC_CORE_CRYPTO_CRYPTO_SERVER_CONFIG_PROTOBUF_H_
 
-#include <stddef.h>
-#include <stdint.h>
+#include <cstddef>
+#include <cstdint>
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "base/logging.h"
 #include "base/macros.h"
-#include "base/stl_util.h"
-#include "base/strings/string_piece.h"
-#include "net/base/net_export.h"
 #include "net/quic/core/crypto/crypto_protocol.h"
+#include "net/quic/platform/api/quic_export.h"
+#include "net/quic/platform/api/quic_string_piece.h"
 
 namespace net {
 
 // QuicServerConfigProtobuf contains QUIC server config block and the private
 // keys needed to prove ownership.
 // TODO(rch): sync with server more rationally.
-class NET_EXPORT_PRIVATE QuicServerConfigProtobuf {
+class QUIC_EXPORT_PRIVATE QuicServerConfigProtobuf {
  public:
   // PrivateKey contains a QUIC tag of a key exchange algorithm and a
   // serialised private key for that algorithm. The format of the serialised
   // private key is specific to the algorithm in question.
-  class NET_EXPORT_PRIVATE PrivateKey {
+  class QUIC_EXPORT_PRIVATE PrivateKey {
    public:
     QuicTag tag() const { return tag_; }
     void set_tag(QuicTag tag) { tag_ = tag; }
@@ -47,19 +47,19 @@ class NET_EXPORT_PRIVATE QuicServerConfigProtobuf {
 
   const PrivateKey& key(size_t i) const {
     DCHECK_GT(keys_.size(), i);
-    return *keys_[i];
+    return *keys_[i].get();
   }
 
   std::string config() const { return config_; }
 
-  void set_config(base::StringPiece config) { config.CopyToString(&config_); }
+  void set_config(QuicStringPiece config) { config.CopyToString(&config_); }
 
   QuicServerConfigProtobuf::PrivateKey* add_key() {
-    keys_.push_back(new PrivateKey);
-    return keys_.back();
+    keys_.push_back(std::make_unique<PrivateKey>());
+    return keys_.back().get();
   }
 
-  void clear_key() { base::STLDeleteElements(&keys_); }
+  void clear_key() { keys_.clear(); }
 
   bool has_primary_time() const { return primary_time_ > 0; }
 
@@ -82,13 +82,13 @@ class NET_EXPORT_PRIVATE QuicServerConfigProtobuf {
   }
 
   void set_source_address_token_secret_override(
-      base::StringPiece source_address_token_secret_override) {
+      QuicStringPiece source_address_token_secret_override) {
     source_address_token_secret_override.CopyToString(
         &source_address_token_secret_override_);
   }
 
  private:
-  std::vector<PrivateKey*> keys_;
+  std::vector<std::unique_ptr<PrivateKey>> keys_;
 
   // config_ is a serialised config in QUIC wire format.
   std::string config_;
@@ -112,4 +112,4 @@ class NET_EXPORT_PRIVATE QuicServerConfigProtobuf {
 
 }  // namespace net
 
-#endif  // NET_QUIC_CRYPTO_CRYPTO_SERVER_CONFIG_PROTOBUF_H_
+#endif  // NET_QUIC_CORE_CRYPTO_CRYPTO_SERVER_CONFIG_PROTOBUF_H_

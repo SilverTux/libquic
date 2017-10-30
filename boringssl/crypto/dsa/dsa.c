@@ -72,13 +72,14 @@
 #include <openssl/sha.h>
 #include <openssl/thread.h>
 
+#include "../fipsmodule/bn/internal.h"
 #include "../internal.h"
 
 
 #define OPENSSL_DSA_MAX_MODULUS_BITS 10000
 
-/* Primality test according to FIPS PUB 186[-1], Appendix 2.1: 50 rounds of
- * Rabin-Miller */
+// Primality test according to FIPS PUB 186[-1], Appendix 2.1: 50 rounds of
+// Rabin-Miller
 #define DSS_prime_checks 50
 
 static CRYPTO_EX_DATA_CLASS g_ex_data_class = CRYPTO_EX_DATA_CLASS_INIT;
@@ -90,11 +91,11 @@ DSA *DSA_new(void) {
     return NULL;
   }
 
-  memset(dsa, 0, sizeof(DSA));
+  OPENSSL_memset(dsa, 0, sizeof(DSA));
 
   dsa->references = 1;
 
-  CRYPTO_MUTEX_init(&dsa->method_mont_p_lock);
+  CRYPTO_MUTEX_init(&dsa->method_mont_lock);
   CRYPTO_new_ex_data(&dsa->ex_data);
 
   return dsa;
@@ -119,12 +120,76 @@ void DSA_free(DSA *dsa) {
   BN_clear_free(dsa->kinv);
   BN_clear_free(dsa->r);
   BN_MONT_CTX_free(dsa->method_mont_p);
-  CRYPTO_MUTEX_cleanup(&dsa->method_mont_p_lock);
+  BN_MONT_CTX_free(dsa->method_mont_q);
+  CRYPTO_MUTEX_cleanup(&dsa->method_mont_lock);
   OPENSSL_free(dsa);
 }
 
 int DSA_up_ref(DSA *dsa) {
   CRYPTO_refcount_inc(&dsa->references);
+  return 1;
+}
+
+void DSA_get0_key(const DSA *dsa, const BIGNUM **out_pub_key,
+                  const BIGNUM **out_priv_key) {
+  if (out_pub_key != NULL) {
+    *out_pub_key = dsa->pub_key;
+  }
+  if (out_priv_key != NULL) {
+    *out_priv_key = dsa->priv_key;
+  }
+}
+
+void DSA_get0_pqg(const DSA *dsa, const BIGNUM **out_p, const BIGNUM **out_q,
+                  const BIGNUM **out_g) {
+  if (out_p != NULL) {
+    *out_p = dsa->p;
+  }
+  if (out_q != NULL) {
+    *out_q = dsa->q;
+  }
+  if (out_g != NULL) {
+    *out_g = dsa->g;
+  }
+}
+
+int DSA_set0_key(DSA *dsa, BIGNUM *pub_key, BIGNUM *priv_key) {
+  if (dsa->pub_key == NULL && pub_key == NULL) {
+    return 0;
+  }
+
+  if (pub_key != NULL) {
+    BN_free(dsa->pub_key);
+    dsa->pub_key = pub_key;
+  }
+  if (priv_key != NULL) {
+    BN_free(dsa->priv_key);
+    dsa->priv_key = priv_key;
+  }
+
+  return 1;
+}
+
+int DSA_set0_pqg(DSA *dsa, BIGNUM *p, BIGNUM *q, BIGNUM *g) {
+  if ((dsa->p == NULL && p == NULL) ||
+      (dsa->q == NULL && q == NULL) ||
+      (dsa->g == NULL && g == NULL)) {
+    return 0;
+  }
+
+  if (p != NULL) {
+    BN_free(dsa->p);
+    dsa->p = p;
+  }
+  if (q != NULL) {
+    BN_free(dsa->q);
+    dsa->q = q;
+  }
+  if (g != NULL) {
+    BN_free(dsa->g);
+    dsa->g = g;
+  }
+
   return 1;
 }
 
@@ -161,10 +226,10 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
       return 0;
     }
     if (seed_len > (size_t)qsize) {
-      /* Only consume as much seed as is expected. */
+      // Only consume as much seed as is expected.
       seed_len = qsize;
     }
-    memcpy(seed, seed_in, seed_len);
+    OPENSSL_memcpy(seed, seed_in, seed_len);
   }
 
   ctx = BN_CTX_new();
@@ -192,9 +257,9 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
   }
 
   for (;;) {
-    /* Find q. */
+    // Find q.
     for (;;) {
-      /* step 1 */
+      // step 1
       if (!BN_GENCB_call(cb, 0, m++)) {
         goto err;
       }
@@ -205,12 +270,12 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
           goto err;
         }
       } else {
-        /* If we come back through, use random seed next time. */
+        // If we come back through, use random seed next time.
         seed_in = NULL;
       }
-      memcpy(buf, seed, qsize);
-      memcpy(buf2, seed, qsize);
-      /* precompute "SEED + 1" for step 7: */
+      OPENSSL_memcpy(buf, seed, qsize);
+      OPENSSL_memcpy(buf2, seed, qsize);
+      // precompute "SEED + 1" for step 7:
       for (i = qsize - 1; i < qsize; i--) {
         buf[i]++;
         if (buf[i] != 0) {
@@ -218,7 +283,7 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
         }
       }
 
-      /* step 2 */
+      // step 2
       if (!EVP_Digest(seed, qsize, md, NULL, evpmd, NULL) ||
           !EVP_Digest(buf, qsize, buf2, NULL, evpmd, NULL)) {
         goto err;
@@ -227,14 +292,14 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
         md[i] ^= buf2[i];
       }
 
-      /* step 3 */
+      // step 3
       md[0] |= 0x80;
       md[qsize - 1] |= 0x01;
       if (!BN_bin2bn(md, qsize, q)) {
         goto err;
       }
 
-      /* step 4 */
+      // step 4
       r = BN_is_prime_fasttest_ex(q, DSS_prime_checks, ctx, use_random_seed, cb);
       if (r > 0) {
         break;
@@ -243,17 +308,17 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
         goto err;
       }
 
-      /* do a callback call */
-      /* step 5 */
+      // do a callback call
+      // step 5
     }
 
     if (!BN_GENCB_call(cb, 2, 0) || !BN_GENCB_call(cb, 3, 0)) {
       goto err;
     }
 
-    /* step 6 */
+    // step 6
     counter = 0;
-    /* "offset = 2" */
+    // "offset = 2"
 
     n = (bits - 1) / 160;
 
@@ -262,11 +327,11 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
         goto err;
       }
 
-      /* step 7 */
+      // step 7
       BN_zero(W);
-      /* now 'buf' contains "SEED + offset - 1" */
+      // now 'buf' contains "SEED + offset - 1"
       for (k = 0; k <= n; k++) {
-        /* obtain "SEED + offset + k" by incrementing: */
+        // obtain "SEED + offset + k" by incrementing:
         for (i = qsize - 1; i < qsize; i--) {
           buf[i]++;
           if (buf[i] != 0) {
@@ -278,7 +343,7 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
           goto err;
         }
 
-        /* step 8 */
+        // step 8
         if (!BN_bin2bn(md, qsize, r0) ||
             !BN_lshift(r0, r0, (qsize << 3) * k) ||
             !BN_add(W, W, r0)) {
@@ -286,14 +351,14 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
         }
       }
 
-      /* more of step 8 */
+      // more of step 8
       if (!BN_mask_bits(W, bits - 1) ||
           !BN_copy(X, W) ||
           !BN_add(X, X, test)) {
         goto err;
       }
 
-      /* step 9 */
+      // step 9
       if (!BN_lshift1(r0, q) ||
           !BN_mod(c, X, r0, ctx) ||
           !BN_sub(r0, c, BN_value_one()) ||
@@ -301,23 +366,23 @@ int DSA_generate_parameters_ex(DSA *dsa, unsigned bits, const uint8_t *seed_in,
         goto err;
       }
 
-      /* step 10 */
+      // step 10
       if (BN_cmp(p, test) >= 0) {
-        /* step 11 */
+        // step 11
         r = BN_is_prime_fasttest_ex(p, DSS_prime_checks, ctx, 1, cb);
         if (r > 0) {
-          goto end; /* found it */
+          goto end;  // found it
         }
         if (r != 0) {
           goto err;
         }
       }
 
-      /* step 13 */
+      // step 13
       counter++;
-      /* "offset = offset + n + 1" */
+      // "offset = offset + n + 1"
 
-      /* step 14 */
+      // step 14
       if (counter >= 4096) {
         break;
       }
@@ -328,8 +393,8 @@ end:
     goto err;
   }
 
-  /* We now need to generate g */
-  /* Set r0=(p-1)/q */
+  // We now need to generate g
+  // Set r0=(p-1)/q
   if (!BN_sub(test, p, BN_value_one()) ||
       !BN_div(r0, NULL, test, q, ctx)) {
     goto err;
@@ -341,7 +406,7 @@ end:
   }
 
   for (;;) {
-    /* g=test^r0%p */
+    // g=test^r0%p
     if (!BN_mod_exp_mont(g, test, r0, p, ctx, mont)) {
       goto err;
     }
@@ -409,7 +474,6 @@ int DSA_generate_key(DSA *dsa) {
   int ok = 0;
   BN_CTX *ctx = NULL;
   BIGNUM *pub_key = NULL, *priv_key = NULL;
-  BIGNUM prk;
 
   ctx = BN_CTX_new();
   if (ctx == NULL) {
@@ -424,11 +488,9 @@ int DSA_generate_key(DSA *dsa) {
     }
   }
 
-  do {
-    if (!BN_rand_range(priv_key, dsa->q)) {
-      goto err;
-    }
-  } while (BN_is_zero(priv_key));
+  if (!BN_rand_range_ex(priv_key, 1, dsa->q)) {
+    goto err;
+  }
 
   pub_key = dsa->pub_key;
   if (pub_key == NULL) {
@@ -438,10 +500,10 @@ int DSA_generate_key(DSA *dsa) {
     }
   }
 
-  BN_init(&prk);
-  BN_with_flags(&prk, priv_key, BN_FLG_CONSTTIME);
-
-  if (!BN_mod_exp(pub_key, dsa->g, &prk, dsa->p, ctx)) {
+  if (!BN_MONT_CTX_set_locked(&dsa->method_mont_p, &dsa->method_mont_lock,
+                              dsa->p, ctx) ||
+      !BN_mod_exp_mont_consttime(pub_key, dsa->g, priv_key, dsa->p, ctx,
+                                 dsa->method_mont_p)) {
     goto err;
   }
 
@@ -522,9 +584,9 @@ redo:
   }
 
   if (digest_len > BN_num_bytes(dsa->q)) {
-    /* if the digest length is greater than the size of q use the
-     * BN_num_bits(dsa->q) leftmost bits of the digest, see
-     * fips 186-3, 4.2 */
+    // if the digest length is greater than the size of q use the
+    // BN_num_bits(dsa->q) leftmost bits of the digest, see
+    // fips 186-3, 4.2
     digest_len = BN_num_bytes(dsa->q);
   }
 
@@ -532,12 +594,12 @@ redo:
     goto err;
   }
 
-  /* Compute  s = inv(k) (m + xr) mod q */
+  // Compute  s = inv(k) (m + xr) mod q
   if (!BN_mod_mul(&xr, dsa->priv_key, r, dsa->q, ctx)) {
-    goto err; /* s = xr */
+    goto err;  // s = xr
   }
   if (!BN_add(s, &xr, &m)) {
-    goto err; /* s = m + xr */
+    goto err;  // s = m + xr
   }
   if (BN_cmp(s, dsa->q) > 0) {
     if (!BN_sub(s, s, dsa->q)) {
@@ -548,8 +610,8 @@ redo:
     goto err;
   }
 
-  /* Redo if r or s is zero as required by FIPS 186-3: this is
-   * very unlikely. */
+  // Redo if r or s is zero as required by FIPS 186-3: this is
+  // very unlikely.
   if (BN_is_zero(r) || BN_is_zero(s)) {
     if (noredo) {
       reason = DSA_R_NEED_NEW_SETUP_VALUES;
@@ -602,7 +664,7 @@ int DSA_do_check_signature(int *out_valid, const uint8_t *digest,
   }
 
   i = BN_num_bits(dsa->q);
-  /* fips 186-3 allows only different sizes for q */
+  // fips 186-3 allows only different sizes for q
   if (i != 160 && i != 224 && i != 256) {
     OPENSSL_PUT_ERROR(DSA, DSA_R_BAD_Q_VALUE);
     return 0;
@@ -633,17 +695,17 @@ int DSA_do_check_signature(int *out_valid, const uint8_t *digest,
     goto err;
   }
 
-  /* Calculate W = inv(S) mod Q
-   * save W in u2 */
+  // Calculate W = inv(S) mod Q
+  // save W in u2
   if (BN_mod_inverse(&u2, sig->s, dsa->q, ctx) == NULL) {
     goto err;
   }
 
-  /* save M in u1 */
+  // save M in u1
   if (digest_len > (i >> 3)) {
-    /* if the digest length is greater than the size of q use the
-     * BN_num_bits(dsa->q) leftmost bits of the digest, see
-     * fips 186-3, 4.2 */
+    // if the digest length is greater than the size of q use the
+    // BN_num_bits(dsa->q) leftmost bits of the digest, see
+    // fips 186-3, 4.2
     digest_len = (i >> 3);
   }
 
@@ -651,18 +713,18 @@ int DSA_do_check_signature(int *out_valid, const uint8_t *digest,
     goto err;
   }
 
-  /* u1 = M * w mod q */
+  // u1 = M * w mod q
   if (!BN_mod_mul(&u1, &u1, &u2, dsa->q, ctx)) {
     goto err;
   }
 
-  /* u2 = r * w mod q */
+  // u2 = r * w mod q
   if (!BN_mod_mul(&u2, sig->r, &u2, dsa->q, ctx)) {
     goto err;
   }
 
   if (!BN_MONT_CTX_set_locked((BN_MONT_CTX **)&dsa->method_mont_p,
-                              (CRYPTO_MUTEX *)&dsa->method_mont_p_lock, dsa->p,
+                              (CRYPTO_MUTEX *)&dsa->method_mont_lock, dsa->p,
                               ctx)) {
     goto err;
   }
@@ -672,14 +734,14 @@ int DSA_do_check_signature(int *out_valid, const uint8_t *digest,
     goto err;
   }
 
-  /* BN_copy(&u1,&t1); */
-  /* let u1 = u1 mod q */
+  // BN_copy(&u1,&t1);
+  // let u1 = u1 mod q
   if (!BN_mod(&u1, &t1, dsa->q, ctx)) {
     goto err;
   }
 
-  /* V is now in u1.  If the signature is correct, it will be
-   * equal to R. */
+  // V is now in u1.  If the signature is correct, it will be
+  // equal to R.
   *out_valid = BN_ucmp(&u1, sig->r) == 0;
   ret = 1;
 
@@ -736,9 +798,10 @@ int DSA_check_signature(int *out_valid, const uint8_t *digest,
     goto err;
   }
 
-  /* Ensure that the signature uses DER and doesn't have trailing garbage. */
+  // Ensure that the signature uses DER and doesn't have trailing garbage.
   int der_len = i2d_DSA_SIG(s, &der);
-  if (der_len < 0 || (size_t)der_len != sig_len || memcmp(sig, der, sig_len)) {
+  if (der_len < 0 || (size_t)der_len != sig_len ||
+      OPENSSL_memcmp(sig, der, sig_len)) {
     goto err;
   }
 
@@ -750,8 +813,8 @@ err:
   return ret;
 }
 
-/* der_len_len returns the number of bytes needed to represent a length of |len|
- * in DER. */
+// der_len_len returns the number of bytes needed to represent a length of |len|
+// in DER.
 static size_t der_len_len(size_t len) {
   if (len < 0x80) {
     return 1;
@@ -766,18 +829,18 @@ static size_t der_len_len(size_t len) {
 
 int DSA_size(const DSA *dsa) {
   size_t order_len = BN_num_bytes(dsa->q);
-  /* Compute the maximum length of an |order_len| byte integer. Defensively
-   * assume that the leading 0x00 is included. */
+  // Compute the maximum length of an |order_len| byte integer. Defensively
+  // assume that the leading 0x00 is included.
   size_t integer_len = 1 /* tag */ + der_len_len(order_len + 1) + 1 + order_len;
   if (integer_len < order_len) {
     return 0;
   }
-  /* A DSA signature is two INTEGERs. */
+  // A DSA signature is two INTEGERs.
   size_t value_len = 2 * integer_len;
   if (value_len < integer_len) {
     return 0;
   }
-  /* Add the header. */
+  // Add the header.
   size_t ret = 1 /* tag */ + der_len_len(value_len) + value_len;
   if (ret < value_len) {
     return 0;
@@ -788,7 +851,7 @@ int DSA_size(const DSA *dsa) {
 int DSA_sign_setup(const DSA *dsa, BN_CTX *ctx_in, BIGNUM **out_kinv,
                    BIGNUM **out_r) {
   BN_CTX *ctx;
-  BIGNUM k, kq, *K, *kinv = NULL, *r = NULL;
+  BIGNUM k, kq, *kinv = NULL, *r = NULL;
   int ret = 0;
 
   if (!dsa->p || !dsa->q || !dsa->g) {
@@ -812,31 +875,30 @@ int DSA_sign_setup(const DSA *dsa, BN_CTX *ctx_in, BIGNUM **out_kinv,
     goto err;
   }
 
-  /* Get random k */
-  do {
-    if (!BN_rand_range(&k, dsa->q)) {
-      goto err;
-    }
-  } while (BN_is_zero(&k));
-
-  BN_set_flags(&k, BN_FLG_CONSTTIME);
+  // Get random k
+  if (!BN_rand_range_ex(&k, 1, dsa->q)) {
+    goto err;
+  }
 
   if (!BN_MONT_CTX_set_locked((BN_MONT_CTX **)&dsa->method_mont_p,
-                              (CRYPTO_MUTEX *)&dsa->method_mont_p_lock, dsa->p,
+                              (CRYPTO_MUTEX *)&dsa->method_mont_lock, dsa->p,
+                              ctx) ||
+      !BN_MONT_CTX_set_locked((BN_MONT_CTX **)&dsa->method_mont_q,
+                              (CRYPTO_MUTEX *)&dsa->method_mont_lock, dsa->q,
                               ctx)) {
     goto err;
   }
 
-  /* Compute r = (g^k mod p) mod q */
+  // Compute r = (g^k mod p) mod q
   if (!BN_copy(&kq, &k)) {
     goto err;
   }
 
-  /* We do not want timing information to leak the length of k,
-   * so we compute g^k using an equivalent exponent of fixed length.
-   *
-   * (This is a kludge that we need because the BN_mod_exp_mont()
-   * does not let us specify the desired timing behaviour.) */
+  // We do not want timing information to leak the length of k,
+  // so we compute g^k using an equivalent exponent of fixed length.
+  //
+  // (This is a kludge that we need because the BN_mod_exp_mont()
+  // does not let us specify the desired timing behaviour.)
 
   if (!BN_add(&kq, &kq, dsa->q)) {
     goto err;
@@ -845,18 +907,19 @@ int DSA_sign_setup(const DSA *dsa, BN_CTX *ctx_in, BIGNUM **out_kinv,
     goto err;
   }
 
-  K = &kq;
-
-  if (!BN_mod_exp_mont(r, dsa->g, K, dsa->p, ctx, dsa->method_mont_p)) {
+  if (!BN_mod_exp_mont_consttime(r, dsa->g, &kq, dsa->p, ctx,
+                                 dsa->method_mont_p)) {
     goto err;
   }
   if (!BN_mod(r, r, dsa->q, ctx)) {
     goto err;
   }
 
-  /* Compute  part of 's = inv(k) (m + xr) mod q' */
-  kinv = BN_mod_inverse(NULL, &k, dsa->q, ctx);
-  if (kinv == NULL) {
+  // Compute part of 's = inv(k) (m + xr) mod q' using Fermat's Little
+  // Theorem.
+  kinv = BN_new();
+  if (kinv == NULL ||
+      !bn_mod_inverse_prime(kinv, &k, dsa->q, ctx, dsa->method_mont_q)) {
     goto err;
   }
 
@@ -880,48 +943,49 @@ err:
   }
   BN_clear_free(&k);
   BN_clear_free(&kq);
+  BN_clear_free(kinv);
   return ret;
 }
 
 int DSA_get_ex_new_index(long argl, void *argp, CRYPTO_EX_unused *unused,
-                         CRYPTO_EX_dup *dup_func, CRYPTO_EX_free *free_func) {
+                         CRYPTO_EX_dup *dup_unused, CRYPTO_EX_free *free_func) {
   int index;
-  if (!CRYPTO_get_ex_new_index(&g_ex_data_class, &index, argl, argp, dup_func,
+  if (!CRYPTO_get_ex_new_index(&g_ex_data_class, &index, argl, argp,
                                free_func)) {
     return -1;
   }
   return index;
 }
 
-int DSA_set_ex_data(DSA *d, int idx, void *arg) {
-  return CRYPTO_set_ex_data(&d->ex_data, idx, arg);
+int DSA_set_ex_data(DSA *dsa, int idx, void *arg) {
+  return CRYPTO_set_ex_data(&dsa->ex_data, idx, arg);
 }
 
-void *DSA_get_ex_data(const DSA *d, int idx) {
-  return CRYPTO_get_ex_data(&d->ex_data, idx);
+void *DSA_get_ex_data(const DSA *dsa, int idx) {
+  return CRYPTO_get_ex_data(&dsa->ex_data, idx);
 }
 
-DH *DSA_dup_DH(const DSA *r) {
-  DH *ret = NULL;
-
-  if (r == NULL) {
-    goto err;
+DH *DSA_dup_DH(const DSA *dsa) {
+  if (dsa == NULL) {
+    return NULL;
   }
-  ret = DH_new();
+
+  DH *ret = DH_new();
   if (ret == NULL) {
     goto err;
   }
-  if (r->q != NULL) {
-    ret->priv_length = BN_num_bits(r->q);
-    if ((ret->q = BN_dup(r->q)) == NULL) {
+  if (dsa->q != NULL) {
+    ret->priv_length = BN_num_bits(dsa->q);
+    if ((ret->q = BN_dup(dsa->q)) == NULL) {
       goto err;
     }
   }
-  if ((r->p != NULL && (ret->p = BN_dup(r->p)) == NULL) ||
-      (r->g != NULL && (ret->g = BN_dup(r->g)) == NULL) ||
-      (r->pub_key != NULL && (ret->pub_key = BN_dup(r->pub_key)) == NULL) ||
-      (r->priv_key != NULL && (ret->priv_key = BN_dup(r->priv_key)) == NULL)) {
-      goto err;
+  if ((dsa->p != NULL && (ret->p = BN_dup(dsa->p)) == NULL) ||
+      (dsa->g != NULL && (ret->g = BN_dup(dsa->g)) == NULL) ||
+      (dsa->pub_key != NULL && (ret->pub_key = BN_dup(dsa->pub_key)) == NULL) ||
+      (dsa->priv_key != NULL &&
+       (ret->priv_key = BN_dup(dsa->priv_key)) == NULL)) {
+    goto err;
   }
 
   return ret;

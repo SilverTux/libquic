@@ -18,9 +18,9 @@ namespace internal {
 // call.
 class PriorityQueue::SequenceAndSortKey {
  public:
-  SequenceAndSortKey(scoped_refptr<Sequence>&& sequence,
+  SequenceAndSortKey(scoped_refptr<Sequence> sequence,
                      const SequenceSortKey& sort_key)
-      : sequence_(sequence), sort_key_(sort_key) {
+      : sequence_(std::move(sequence)), sort_key_(sort_key) {
     DCHECK(sequence_);
   }
 
@@ -93,12 +93,11 @@ bool PriorityQueue::Transaction::IsEmpty() const {
   return outer_queue_->container_.empty();
 }
 
-PriorityQueue::PriorityQueue() = default;
-
-PriorityQueue::PriorityQueue(const PriorityQueue* predecessor_priority_queue)
-    : container_lock_(&predecessor_priority_queue->container_lock_) {
-  DCHECK(predecessor_priority_queue);
+size_t PriorityQueue::Transaction::Size() const {
+  return outer_queue_->container_.size();
 }
+
+PriorityQueue::PriorityQueue() = default;
 
 PriorityQueue::~PriorityQueue() = default;
 

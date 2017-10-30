@@ -2,25 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <string.h>
-
-#include <memory>
-
 #include "net/quic/core/crypto/aead_base_encrypter.h"
-#include "net/quic/core/quic_flags.h"
-#include "net/quic/core/quic_utils.h"
 
-using base::StringPiece;
+#include <string>
+
+#include "net/quic/core/quic_utils.h"
+#include "net/quic/platform/api/quic_aligned.h"
+#include "net/quic/platform/api/quic_bug_tracker.h"
+#include "net/quic/platform/api/quic_logging.h"
+#include "third_party/boringssl/src/include/openssl/err.h"
+#include "third_party/boringssl/src/include/openssl/evp.h"
 
 namespace net {
 
 namespace {
-
-// The maximum size in bytes of the nonce, including 8 bytes of sequence number.
-// ChaCha20 uses only the 8 byte sequence number and AES-GCM uses 12 bytes.
-const size_t kMaxNonceSize = 12;
 
 // In debug builds only, log OpenSSL error stack. Then clear OpenSSL error
 // stack.
@@ -32,7 +27,7 @@ void DLogOpenSslErrors() {
   while (unsigned long error = ERR_get_error()) {
     char buf[120];
     ERR_error_string_n(error, buf, arraysize(buf));
-    DLOG(ERROR) << "OpenSSL error: " << buf;
+    QUIC_DLOG(ERROR) << "OpenSSL error: " << buf;
   }
 #endif
 }
@@ -42,19 +37,21 @@ void DLogOpenSslErrors() {
 AeadBaseEncrypter::AeadBaseEncrypter(const EVP_AEAD* aead_alg,
                                      size_t key_size,
                                      size_t auth_tag_size,
-                                     size_t nonce_prefix_size)
+                                     size_t nonce_size,
+                                     bool use_ietf_nonce_construction)
     : aead_alg_(aead_alg),
       key_size_(key_size),
       auth_tag_size_(auth_tag_size),
-      nonce_prefix_size_(nonce_prefix_size) {
+      nonce_size_(nonce_size),
+      use_ietf_nonce_construction_(use_ietf_nonce_construction) {
   DCHECK_LE(key_size_, sizeof(key_));
-  DCHECK_LE(nonce_prefix_size_, sizeof(nonce_prefix_));
-  DCHECK_GE(kMaxNonceSize, nonce_prefix_size_);
+  DCHECK_LE(nonce_size_, sizeof(iv_));
+  DCHECK_GE(kMaxNonceSize, nonce_size_);
 }
 
 AeadBaseEncrypter::~AeadBaseEncrypter() {}
 
-bool AeadBaseEncrypter::SetKey(StringPiece key) {
+bool AeadBaseEncrypter::SetKey(QuicStringPiece key) {
   DCHECK_EQ(key.size(), key_size_);
   if (key.size() != key_size_) {
     return false;
@@ -72,22 +69,37 @@ bool AeadBaseEncrypter::SetKey(StringPiece key) {
   return true;
 }
 
-bool AeadBaseEncrypter::SetNoncePrefix(StringPiece nonce_prefix) {
-  DCHECK_EQ(nonce_prefix.size(), nonce_prefix_size_);
-  if (nonce_prefix.size() != nonce_prefix_size_) {
+bool AeadBaseEncrypter::SetNoncePrefix(QuicStringPiece nonce_prefix) {
+  if (use_ietf_nonce_construction_) {
+    QUIC_BUG << "Attempted to set nonce prefix on IETF QUIC crypter";
     return false;
   }
-  memcpy(nonce_prefix_, nonce_prefix.data(), nonce_prefix.size());
+  DCHECK_EQ(nonce_prefix.size(), nonce_size_ - sizeof(QuicPacketNumber));
+  if (nonce_prefix.size() != nonce_size_ - sizeof(QuicPacketNumber)) {
+    return false;
+  }
+  memcpy(iv_, nonce_prefix.data(), nonce_prefix.size());
   return true;
 }
 
-bool AeadBaseEncrypter::Encrypt(StringPiece nonce,
-                                StringPiece associated_data,
-                                StringPiece plaintext,
-                                unsigned char* output) {
-  if (nonce.size() != nonce_prefix_size_ + sizeof(QuicPacketNumber)) {
+bool AeadBaseEncrypter::SetIV(QuicStringPiece iv) {
+  if (!use_ietf_nonce_construction_) {
+    QUIC_BUG << "Attempted to set IV on Google QUIC crypter";
     return false;
   }
+  DCHECK_EQ(iv.size(), nonce_size_);
+  if (iv.size() != nonce_size_) {
+    return false;
+  }
+  memcpy(iv_, iv.data(), iv.size());
+  return true;
+}
+
+bool AeadBaseEncrypter::Encrypt(QuicStringPiece nonce,
+                                QuicStringPiece associated_data,
+                                QuicStringPiece plaintext,
+                                unsigned char* output) {
+  DCHECK_EQ(nonce.size(), nonce_size_);
 
   size_t ciphertext_len;
   if (!EVP_AEAD_CTX_seal(
@@ -104,10 +116,10 @@ bool AeadBaseEncrypter::Encrypt(StringPiece nonce,
   return true;
 }
 
-bool AeadBaseEncrypter::EncryptPacket(QuicPathId path_id,
+bool AeadBaseEncrypter::EncryptPacket(QuicTransportVersion /*version*/,
                                       QuicPacketNumber packet_number,
-                                      StringPiece associated_data,
-                                      StringPiece plaintext,
+                                      QuicStringPiece associated_data,
+                                      QuicStringPiece plaintext,
                                       char* output,
                                       size_t* output_length,
                                       size_t max_output_length) {
@@ -117,15 +129,19 @@ bool AeadBaseEncrypter::EncryptPacket(QuicPathId path_id,
   }
   // TODO(ianswett): Introduce a check to ensure that we don't encrypt with the
   // same packet number twice.
-  const size_t nonce_size = nonce_prefix_size_ + sizeof(packet_number);
-  ALIGNAS(4) char nonce_buffer[kMaxNonceSize];
-  memcpy(nonce_buffer, nonce_prefix_, nonce_prefix_size_);
-  uint64_t path_id_packet_number =
-      QuicUtils::PackPathIdAndPacketNumber(path_id, packet_number);
-  memcpy(nonce_buffer + nonce_prefix_size_, &path_id_packet_number,
-         sizeof(path_id_packet_number));
+  QUIC_ALIGNED(4) char nonce_buffer[kMaxNonceSize];
+  memcpy(nonce_buffer, iv_, nonce_size_);
+  size_t prefix_len = nonce_size_ - sizeof(packet_number);
+  if (use_ietf_nonce_construction_) {
+    for (size_t i = 0; i < sizeof(packet_number); ++i) {
+      nonce_buffer[prefix_len + i] ^=
+          (packet_number >> ((sizeof(packet_number) - i + 1) * 8)) & 0xff;
+    }
+  } else {
+    memcpy(nonce_buffer + prefix_len, &packet_number, sizeof(packet_number));
+  }
 
-  if (!Encrypt(StringPiece(nonce_buffer, nonce_size), associated_data,
+  if (!Encrypt(QuicStringPiece(nonce_buffer, nonce_size_), associated_data,
                plaintext, reinterpret_cast<unsigned char*>(output))) {
     return false;
   }
@@ -138,7 +154,7 @@ size_t AeadBaseEncrypter::GetKeySize() const {
 }
 
 size_t AeadBaseEncrypter::GetNoncePrefixSize() const {
-  return nonce_prefix_size_;
+  return nonce_size_ - sizeof(QuicPacketNumber);
 }
 
 size_t AeadBaseEncrypter::GetMaxPlaintextSize(size_t ciphertext_size) const {
@@ -149,16 +165,13 @@ size_t AeadBaseEncrypter::GetCiphertextSize(size_t plaintext_size) const {
   return plaintext_size + auth_tag_size_;
 }
 
-StringPiece AeadBaseEncrypter::GetKey() const {
-  return StringPiece(reinterpret_cast<const char*>(key_), key_size_);
+QuicStringPiece AeadBaseEncrypter::GetKey() const {
+  return QuicStringPiece(reinterpret_cast<const char*>(key_), key_size_);
 }
 
-StringPiece AeadBaseEncrypter::GetNoncePrefix() const {
-  if (nonce_prefix_size_ == 0) {
-    return StringPiece();
-  }
-  return StringPiece(reinterpret_cast<const char*>(nonce_prefix_),
-                     nonce_prefix_size_);
+QuicStringPiece AeadBaseEncrypter::GetNoncePrefix() const {
+  return QuicStringPiece(reinterpret_cast<const char*>(iv_),
+                         GetNoncePrefixSize());
 }
 
 }  // namespace net

@@ -66,7 +66,12 @@
 
 #include "conf_def.h"
 #include "internal.h"
+#include "../internal.h"
 
+
+// The maximum length we can grow a value to after variable expansion. 64k
+// should be more than enough for all reasonable uses.
+#define MAX_CONF_VALUE_LENGTH 65536
 
 static uint32_t conf_value_hash(const CONF_VALUE *v) {
   return (lh_strhash(v->section) << 2) ^ lh_strhash(v->name);
@@ -118,7 +123,7 @@ CONF_VALUE *CONF_VALUE_new(void) {
     OPENSSL_PUT_ERROR(CONF, ERR_R_MALLOC_FAILURE);
     return NULL;
   }
-  memset(v, 0, sizeof(CONF_VALUE));
+  OPENSSL_memset(v, 0, sizeof(CONF_VALUE));
   return v;
 }
 
@@ -258,7 +263,7 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from) {
     } else if (IS_EOF(conf, *from)) {
       break;
     } else if (*from == '$') {
-      /* try to expand it */
+      // try to expand it
       rrp = NULL;
       s = &(from[1]);
       if (*s == '{') {
@@ -298,14 +303,14 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from) {
         }
         e++;
       }
-      /* So at this point we have
-       * np which is the start of the name string which is
-       *   '\0' terminated.
-       * cp which is the start of the section string which is
-       *   '\0' terminated.
-       * e is the 'next point after'.
-       * r and rr are the chars replaced by the '\0'
-       * rp and rrp is where 'r' and 'rr' came from. */
+      // So at this point we have
+      // np which is the start of the name string which is
+      //   '\0' terminated.
+      // cp which is the start of the section string which is
+      //   '\0' terminated.
+      // e is the 'next point after'.
+      // r and rr are the chars replaced by the '\0'
+      // rp and rrp is where 'r' and 'rr' came from.
       p = NCONF_get_string(conf, cp, np);
       if (rrp != NULL) {
         *rrp = rr;
@@ -315,7 +320,15 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from) {
         OPENSSL_PUT_ERROR(CONF, CONF_R_VARIABLE_HAS_NO_VALUE);
         goto err;
       }
-      BUF_MEM_grow_clean(buf, (strlen(p) + buf->length - (e - from)));
+      size_t newsize = strlen(p) + buf->length - (e - from);
+      if (newsize > MAX_CONF_VALUE_LENGTH) {
+        OPENSSL_PUT_ERROR(CONF, CONF_R_VARIABLE_EXPANSION_TOO_LONG);
+        goto err;
+      }
+      if (!BUF_MEM_grow_clean(buf, newsize)) {
+        OPENSSL_PUT_ERROR(CONF, ERR_R_MALLOC_FAILURE);
+        goto err;
+      }
       while (*p) {
         buf->data[to++] = *(p++);
       }
@@ -353,7 +366,7 @@ err:
 static CONF_VALUE *get_section(const CONF *conf, const char *section) {
   CONF_VALUE template;
 
-  memset(&template, 0, sizeof(template));
+  OPENSSL_memset(&template, 0, sizeof(template));
   template.section = (char *) section;
   return lh_CONF_VALUE_retrieve(conf->data, &template);
 }
@@ -370,7 +383,7 @@ const char *NCONF_get_string(const CONF *conf, const char *section,
                              const char *name) {
   CONF_VALUE template, *value;
 
-  memset(&template, 0, sizeof(template));
+  OPENSSL_memset(&template, 0, sizeof(template));
   template.section = (char *) section;
   template.name = (char *) name;
   value = lh_CONF_VALUE_retrieve(conf->data, &template);
@@ -553,25 +566,25 @@ static int def_load_bio(CONF *conf, BIO *in, long *out_error_line) {
         i--;
       }
     }
-    /* we removed some trailing stuff so there is a new
-     * line on the end. */
+    // we removed some trailing stuff so there is a new
+    // line on the end.
     if (ii && i == ii) {
-      again = 1; /* long line */
+      again = 1;  // long line
     } else {
       p[i] = '\0';
-      eline++; /* another input line */
+      eline++;  // another input line
     }
 
-    /* we now have a line with trailing \r\n removed */
+    // we now have a line with trailing \r\n removed
 
-    /* i is the number of bytes */
+    // i is the number of bytes
     bufnum += i;
 
     v = NULL;
-    /* check for line continuation */
+    // check for line continuation
     if (bufnum >= 1) {
-      /* If we have bytes and the last char '\\' and
-       * second last char is not '\\' */
+      // If we have bytes and the last char '\\' and
+      // second last char is not '\\'
       p = &(buff->data[bufnum - 1]);
       if (IS_ESC(conf, p[0]) && ((bufnum <= 1) || !IS_ESC(conf, p[-1]))) {
         bufnum--;
@@ -587,7 +600,7 @@ static int def_load_bio(CONF *conf, BIO *in, long *out_error_line) {
     clear_comments(conf, buf);
     s = eat_ws(conf, buf);
     if (IS_EOF(conf, *s)) {
-      continue; /* blank line */
+      continue;  // blank line
     }
     if (*s == '[') {
       char *ss;
@@ -786,3 +799,5 @@ int CONF_modules_load_file(CONF_MUST_BE_NULL *filename, const char *appname,
 void CONF_modules_free(void) {}
 
 void OPENSSL_config(CONF_MUST_BE_NULL *config_name) {}
+
+void OPENSSL_no_config(void) {}

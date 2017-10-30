@@ -5,9 +5,10 @@
 #ifndef BASE_MAC_MAC_UTIL_H_
 #define BASE_MAC_MAC_UTIL_H_
 
-#include <Carbon/Carbon.h>
 #include <stdint.h>
 #include <string>
+
+#import <CoreGraphics/CoreGraphics.h>
 
 #include "base/base_export.h"
 
@@ -29,9 +30,6 @@ enum FullScreenMode {
   // other classes, so we include it here.
   kFullScreenModeNormal = 10,
 };
-
-BASE_EXPORT std::string PathFromFSRef(const FSRef& ref);
-BASE_EXPORT bool FSRefFromPath(const std::string& path, FSRef* ref);
 
 // Returns an sRGB color space.  The return value is a static value; do not
 // release it!
@@ -64,11 +62,6 @@ BASE_EXPORT void ReleaseFullScreen(FullScreenMode mode);
 // RequestFullScreen(to_mode).  Must be called on the main thread.
 BASE_EXPORT void SwitchFullScreenModes(FullScreenMode from_mode,
                                        FullScreenMode to_mode);
-
-// Returns true if this process is in the foreground, meaning that it's the
-// frontmost process, the one whose menu bar is shown at the top of the main
-// display.
-BASE_EXPORT bool AmIForeground();
 
 // Excludes the file given by |file_path| from being backed up by Time Machine.
 BASE_EXPORT bool SetFileBackupExclusion(const FilePath& file_path);
@@ -154,6 +147,12 @@ DEFINE_IS_OS_FUNCS(12, TEST_DEPLOYMENT_TARGET)
 DEFINE_IS_OS_FUNCS(12, IGNORE_DEPLOYMENT_TARGET)
 #endif
 
+#ifdef MAC_OS_X_VERSION_10_13
+DEFINE_IS_OS_FUNCS(13, TEST_DEPLOYMENT_TARGET)
+#else
+DEFINE_IS_OS_FUNCS(13, IGNORE_DEPLOYMENT_TARGET)
+#endif
+
 #undef IGNORE_DEPLOYMENT_TARGET
 #undef TEST_DEPLOYMENT_TARGET
 #undef DEFINE_IS_OS_FUNCS
@@ -161,8 +160,8 @@ DEFINE_IS_OS_FUNCS(12, IGNORE_DEPLOYMENT_TARGET)
 // This should be infrequently used. It only makes sense to use this to avoid
 // codepaths that are very likely to break on future (unreleased, untested,
 // unborn) OS releases, or to log when the OS is newer than any known version.
-inline bool IsOSLaterThan10_12_DontCallThis() {
-  return !IsAtMostOS10_12();
+inline bool IsOSLaterThan10_13_DontCallThis() {
+  return !IsAtMostOS10_13();
 }
 
 // Retrieve the system's model identifier string from the IOKit registry:

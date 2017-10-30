@@ -6,33 +6,22 @@
 // the underlying UDP socket is available for writing (not write blocked
 // anymore).
 
-#ifndef NET_QUIC_QUIC_BLOCKED_WRITER_INTERFACE_H_
-#define NET_QUIC_QUIC_BLOCKED_WRITER_INTERFACE_H_
+#ifndef NET_QUIC_CORE_QUIC_BLOCKED_WRITER_INTERFACE_H_
+#define NET_QUIC_CORE_QUIC_BLOCKED_WRITER_INTERFACE_H_
 
-#include <stddef.h>
-
-#include "net/base/net_export.h"
+#include "net/quic/platform/api/quic_export.h"
 
 namespace net {
 
-class NET_EXPORT_PRIVATE QuicBlockedWriterInterface {
+class QUIC_EXPORT_PRIVATE QuicBlockedWriterInterface {
  public:
   virtual ~QuicBlockedWriterInterface() {}
 
   // Called by the PacketWriter when the underlying socket becomes writable
   // so that the BlockedWriter can go ahead and try writing.
-  virtual void OnCanWrite() = 0;
-};
-
-// Hash pointers as if they were int's, but bring more entropy to the lower
-// bits.
-struct QuicBlockedWriterInterfacePtrHash {
-  std::size_t operator()(const net::QuicBlockedWriterInterface* ptr) const {
-    size_t k = reinterpret_cast<size_t>(ptr);
-    return k + (k >> 6);
-  }
+  virtual void OnBlockedWriterCanWrite() = 0;
 };
 
 }  // namespace net
 
-#endif  // NET_QUIC_QUIC_BLOCKED_WRITER_INTERFACE_H_
+#endif  // NET_QUIC_CORE_QUIC_BLOCKED_WRITER_INTERFACE_H_

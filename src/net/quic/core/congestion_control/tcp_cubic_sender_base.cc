@@ -5,18 +5,12 @@
 #include "net/quic/core/congestion_control/tcp_cubic_sender_base.h"
 
 #include <algorithm>
-#include <string>
 
-#include "base/metrics/histogram_macros.h"
 #include "net/quic/core/congestion_control/prr_sender.h"
 #include "net/quic/core/congestion_control/rtt_stats.h"
 #include "net/quic/core/crypto/crypto_protocol.h"
 #include "net/quic/core/proto/cached_network_parameters.pb.h"
-#include "net/quic/core/quic_bug_tracker.h"
-#include "net/quic/core/quic_flags.h"
-
-using std::max;
-using std::min;
+#include "net/quic/platform/api/quic_bug_tracker.h"
 
 namespace net {
 
@@ -27,7 +21,6 @@ namespace {
 const QuicByteCount kMaxBurstBytes = 3 * kDefaultTCPMSS;
 const float kRenoBeta = 0.7f;               // Reno backoff factor.
 const uint32_t kDefaultNumConnections = 2;  // N-connection emulation.
-const float kRateBasedExtraCwnd = 1.5f;     // CWND for rate based sending.
 }  // namespace
 
 TcpCubicSenderBase::TcpCubicSenderBase(const QuicClock* clock,
@@ -44,7 +37,6 @@ TcpCubicSenderBase::TcpCubicSenderBase(const QuicClock* clock,
       min4_mode_(false),
       last_cutback_exited_slowstart_(false),
       slow_start_large_reduction_(false),
-      rate_based_sending_(false),
       no_prr_(false) {}
 
 TcpCubicSenderBase::~TcpCubicSenderBase() {}
@@ -93,29 +85,20 @@ void TcpCubicSenderBase::SetFromConfig(const QuicConfig& config,
       // Use unity pacing instead of PRR.
       no_prr_ = true;
     }
-    if (config.HasReceivedConnectionOptions() &&
-        ContainsQuicTag(config.ReceivedConnectionOptions(), kRATE)) {
-      // Rate based sending experiment
-      rate_based_sending_ = true;
-    }
   }
 }
 
-void TcpCubicSenderBase::ResumeConnectionState(
-    const CachedNetworkParameters& cached_network_params,
-    bool max_bandwidth_resumption) {
-  QuicBandwidth bandwidth = QuicBandwidth::FromBytesPerSecond(
-      max_bandwidth_resumption
-          ? cached_network_params.max_bandwidth_estimate_bytes_per_second()
-          : cached_network_params.bandwidth_estimate_bytes_per_second());
-  QuicTime::Delta rtt =
-      QuicTime::Delta::FromMilliseconds(cached_network_params.min_rtt_ms());
+void TcpCubicSenderBase::AdjustNetworkParameters(QuicBandwidth bandwidth,
+                                                 QuicTime::Delta rtt) {
+  if (bandwidth.IsZero() || rtt.IsZero()) {
+    return;
+  }
 
   SetCongestionWindowFromBandwidthAndRtt(bandwidth, rtt);
 }
 
 void TcpCubicSenderBase::SetNumEmulatedConnections(int num_connections) {
-  num_connections_ = max(1, num_connections);
+  num_connections_ = std::max(1, num_connections);
 }
 
 float TcpCubicSenderBase::RenoBeta() const {
@@ -128,30 +111,32 @@ float TcpCubicSenderBase::RenoBeta() const {
 
 void TcpCubicSenderBase::OnCongestionEvent(
     bool rtt_updated,
-    QuicByteCount bytes_in_flight,
-    const CongestionVector& acked_packets,
-    const CongestionVector& lost_packets) {
+    QuicByteCount prior_in_flight,
+    QuicTime event_time,
+    const AckedPacketVector& acked_packets,
+    const LostPacketVector& lost_packets) {
   if (rtt_updated && InSlowStart() &&
       hybrid_slow_start_.ShouldExitSlowStart(
           rtt_stats_->latest_rtt(), rtt_stats_->min_rtt(),
           GetCongestionWindow() / kDefaultTCPMSS)) {
     ExitSlowstart();
   }
-  for (CongestionVector::const_iterator it = lost_packets.begin();
-       it != lost_packets.end(); ++it) {
-    OnPacketLost(it->first, it->second, bytes_in_flight);
+  for (const LostPacket& lost_packet : lost_packets) {
+    OnPacketLost(lost_packet.packet_number, lost_packet.bytes_lost,
+                 prior_in_flight);
   }
-  for (CongestionVector::const_iterator it = acked_packets.begin();
-       it != acked_packets.end(); ++it) {
-    OnPacketAcked(it->first, it->second, bytes_in_flight);
+  for (const AckedPacket acked_packet : acked_packets) {
+    OnPacketAcked(acked_packet.packet_number, acked_packet.bytes_acked,
+                  prior_in_flight, event_time);
   }
 }
 
 void TcpCubicSenderBase::OnPacketAcked(QuicPacketNumber acked_packet_number,
                                        QuicByteCount acked_bytes,
-                                       QuicByteCount bytes_in_flight) {
+                                       QuicByteCount prior_in_flight,
+                                       QuicTime event_time) {
   largest_acked_packet_number_ =
-      max(acked_packet_number, largest_acked_packet_number_);
+      std::max(acked_packet_number, largest_acked_packet_number_);
   if (InRecovery()) {
     if (!no_prr_) {
       // PRR is used when in recovery.
@@ -159,13 +144,14 @@ void TcpCubicSenderBase::OnPacketAcked(QuicPacketNumber acked_packet_number,
     }
     return;
   }
-  MaybeIncreaseCwnd(acked_packet_number, acked_bytes, bytes_in_flight);
+  MaybeIncreaseCwnd(acked_packet_number, acked_bytes, prior_in_flight,
+                    event_time);
   if (InSlowStart()) {
     hybrid_slow_start_.OnPacketAcked(acked_packet_number);
   }
 }
 
-bool TcpCubicSenderBase::OnPacketSent(
+void TcpCubicSenderBase::OnPacketSent(
     QuicTime /*sent_time*/,
     QuicByteCount /*bytes_in_flight*/,
     QuicPacketNumber packet_number,
@@ -175,9 +161,8 @@ bool TcpCubicSenderBase::OnPacketSent(
     ++(stats_->slowstart_packets_sent);
   }
 
-  // Only update bytes_in_flight_ for data packets.
   if (is_retransmittable != HAS_RETRANSMITTABLE_DATA) {
-    return false;
+    return;
   }
   if (InRecovery()) {
     // PRR is used when in recovery.
@@ -186,32 +171,25 @@ bool TcpCubicSenderBase::OnPacketSent(
   DCHECK_LT(largest_sent_packet_number_, packet_number);
   largest_sent_packet_number_ = packet_number;
   hybrid_slow_start_.OnPacketSent(packet_number);
-  return true;
 }
 
-QuicTime::Delta TcpCubicSenderBase::TimeUntilSend(
-    QuicTime /* now */,
-    QuicByteCount bytes_in_flight) const {
+bool TcpCubicSenderBase::CanSend(QuicByteCount bytes_in_flight) {
   if (!no_prr_ && InRecovery()) {
     // PRR is used when in recovery.
-    return prr_.TimeUntilSend(GetCongestionWindow(), bytes_in_flight,
-                              GetSlowStartThreshold());
+    return prr_.CanSend(GetCongestionWindow(), bytes_in_flight,
+                        GetSlowStartThreshold());
   }
   if (GetCongestionWindow() > bytes_in_flight) {
-    return QuicTime::Delta::Zero();
+    return true;
   }
   if (min4_mode_ && bytes_in_flight < 4 * kDefaultTCPMSS) {
-    return QuicTime::Delta::Zero();
+    return true;
   }
-  if (rate_based_sending_ &&
-      GetCongestionWindow() * kRateBasedExtraCwnd > bytes_in_flight) {
-    return QuicTime::Delta::Zero();
-  }
-  return QuicTime::Delta::Infinite();
+  return false;
 }
 
 QuicBandwidth TcpCubicSenderBase::PacingRate(
-    QuicByteCount bytes_in_flight) const {
+    QuicByteCount /* bytes_in_flight */) const {
   // We pace at twice the rate of the underlying sender's bandwidth estimate
   // during slow start and 1.25x during congestion avoidance to ensure pacing
   // doesn't prevent us from filling the window.
@@ -221,11 +199,6 @@ QuicBandwidth TcpCubicSenderBase::PacingRate(
   }
   const QuicBandwidth bandwidth =
       QuicBandwidth::FromBytesAndTimeDelta(GetCongestionWindow(), srtt);
-  if (rate_based_sending_ && bytes_in_flight > GetCongestionWindow()) {
-    // Rate based sending allows sending more than CWND, but reduces the pacing
-    // rate when the bytes in flight is more than the CWND to 75% of bandwidth.
-    return 0.75 * bandwidth;
-  }
   return bandwidth * (InSlowStart() ? 2 : (no_prr_ && InRecovery() ? 1 : 1.25));
 }
 
@@ -236,13 +209,6 @@ QuicBandwidth TcpCubicSenderBase::BandwidthEstimate() const {
     return QuicBandwidth::Zero();
   }
   return QuicBandwidth::FromBytesAndTimeDelta(GetCongestionWindow(), srtt);
-}
-
-QuicTime::Delta TcpCubicSenderBase::RetransmissionDelay() const {
-  if (rtt_stats_->smoothed_rtt().IsZero()) {
-    return QuicTime::Delta::Zero();
-  }
-  return rtt_stats_->smoothed_rtt() + 4 * rtt_stats_->mean_deviation();
 }
 
 bool TcpCubicSenderBase::InSlowStart() const {
@@ -263,6 +229,10 @@ bool TcpCubicSenderBase::IsCwndLimited(QuicByteCount bytes_in_flight) const {
 bool TcpCubicSenderBase::InRecovery() const {
   return largest_acked_packet_number_ <= largest_sent_at_last_cutback_ &&
          largest_acked_packet_number_ != 0;
+}
+
+bool TcpCubicSenderBase::IsProbingForMoreBandwidth() const {
+  return false;
 }
 
 void TcpCubicSenderBase::OnRetransmissionTimeout(bool packets_retransmitted) {

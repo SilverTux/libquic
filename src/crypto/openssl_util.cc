@@ -4,13 +4,15 @@
 
 #include "crypto/openssl_util.h"
 
-#include <openssl/crypto.h>
-#include <openssl/err.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include <string>
+
 #include "base/logging.h"
 #include "base/strings/string_piece.h"
+#include "third_party/boringssl/src/include/openssl/crypto.h"
+#include "third_party/boringssl/src/include/openssl/err.h"
 
 namespace crypto {
 
@@ -37,15 +39,13 @@ void EnsureOpenSSLInit() {
   CRYPTO_library_init();
 }
 
-void ClearOpenSSLERRStack(const tracked_objects::Location& location) {
-  if (logging::DEBUG_MODE && VLOG_IS_ON(1)) {
+void ClearOpenSSLERRStack(const base::Location& location) {
+  if (DCHECK_IS_ON() && VLOG_IS_ON(1)) {
     uint32_t error_num = ERR_peek_error();
     if (error_num == 0)
       return;
 
-    std::string message;
-    location.Write(true, true, &message);
-    DVLOG(1) << "OpenSSL ERR_get_error stack from " << message;
+    DVLOG(1) << "OpenSSL ERR_get_error stack from " << location.ToString();
     ERR_print_errors_cb(&OpenSSLErrorCallback, NULL);
   } else {
     ERR_clear_error();

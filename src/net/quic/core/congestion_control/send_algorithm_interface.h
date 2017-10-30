@@ -4,19 +4,22 @@
 //
 // The pure virtual class for send side congestion control algorithm.
 
-#ifndef NET_QUIC_CONGESTION_CONTROL_SEND_ALGORITHM_INTERFACE_H_
-#define NET_QUIC_CONGESTION_CONTROL_SEND_ALGORITHM_INTERFACE_H_
+#ifndef NET_QUIC_CORE_CONGESTION_CONTROL_SEND_ALGORITHM_INTERFACE_H_
+#define NET_QUIC_CORE_CONGESTION_CONTROL_SEND_ALGORITHM_INTERFACE_H_
 
 #include <algorithm>
 #include <map>
 
-#include "net/base/net_export.h"
+#include "net/quic/core/crypto/quic_random.h"
 #include "net/quic/core/quic_bandwidth.h"
-#include "net/quic/core/quic_clock.h"
 #include "net/quic/core/quic_config.h"
 #include "net/quic/core/quic_connection_stats.h"
-#include "net/quic/core/quic_protocol.h"
+#include "net/quic/core/quic_packets.h"
 #include "net/quic/core/quic_time.h"
+#include "net/quic/core/quic_types.h"
+#include "net/quic/core/quic_unacked_packet_map.h"
+#include "net/quic/platform/api/quic_clock.h"
+#include "net/quic/platform/api/quic_export.h"
 
 namespace net {
 
@@ -25,16 +28,14 @@ class RttStats;
 
 const QuicPacketCount kDefaultMaxCongestionWindowPackets = 2000;
 
-class NET_EXPORT_PRIVATE SendAlgorithmInterface {
+class QUIC_EXPORT_PRIVATE SendAlgorithmInterface {
  public:
-  // A sorted vector of packets.
-  typedef std::vector<std::pair<QuicPacketNumber, QuicPacketLength>>
-      CongestionVector;
-
   static SendAlgorithmInterface* Create(
       const QuicClock* clock,
       const RttStats* rtt_stats,
+      const QuicUnackedPacketMap* unacked_packets,
       CongestionControlType type,
+      QuicRandom* random,
       QuicConnectionStats* stats,
       QuicPacketCount initial_congestion_window);
 
@@ -49,21 +50,20 @@ class NET_EXPORT_PRIVATE SendAlgorithmInterface {
 
   // Indicates an update to the congestion state, caused either by an incoming
   // ack or loss event timeout.  |rtt_updated| indicates whether a new
-  // latest_rtt sample has been taken, |byte_in_flight| the bytes in flight
-  // prior to the congestion event.  |acked_packets| and |lost_packets| are
-  // any packets considered acked or lost as a result of the congestion event.
+  // latest_rtt sample has been taken, |prior_in_flight| the bytes in flight
+  // prior to the congestion event.  |acked_packets| and |lost_packets| are any
+  // packets considered acked or lost as a result of the congestion event.
   virtual void OnCongestionEvent(bool rtt_updated,
-                                 QuicByteCount bytes_in_flight,
-                                 const CongestionVector& acked_packets,
-                                 const CongestionVector& lost_packets) = 0;
+                                 QuicByteCount prior_in_flight,
+                                 QuicTime event_time,
+                                 const AckedPacketVector& acked_packets,
+                                 const LostPacketVector& lost_packets) = 0;
 
   // Inform that we sent |bytes| to the wire, and if the packet is
-  // retransmittable. Returns true if the packet should be tracked by the
-  // congestion manager and included in bytes_in_flight, false otherwise.
-  // |bytes_in_flight| is the number of bytes in flight before the packet was
-  // sent.
+  // retransmittable.  |bytes_in_flight| is the number of bytes in flight before
+  // the packet was sent.
   // Note: this function must be called for every packet sent to the wire.
-  virtual bool OnPacketSent(QuicTime sent_time,
+  virtual void OnPacketSent(QuicTime sent_time,
                             QuicByteCount bytes_in_flight,
                             QuicPacketNumber packet_number,
                             QuicByteCount bytes,
@@ -76,10 +76,9 @@ class NET_EXPORT_PRIVATE SendAlgorithmInterface {
   // Called when connection migrates and cwnd needs to be reset.
   virtual void OnConnectionMigration() = 0;
 
-  // Calculate the time until we can send the next packet.
-  virtual QuicTime::Delta TimeUntilSend(
-      QuicTime now,
-      QuicByteCount bytes_in_flight) const = 0;
+  // Make decision on whether the sender can send right now.  Note that even
+  // when this method returns true, the sending can be delayed due to pacing.
+  virtual bool CanSend(QuicByteCount bytes_in_flight) = 0;
 
   // The pacing rate of the send algorithm.  May be zero if the rate is unknown.
   virtual QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const = 0;
@@ -87,11 +86,6 @@ class NET_EXPORT_PRIVATE SendAlgorithmInterface {
   // What's the current estimated bandwidth in bytes per second.
   // Returns 0 when it does not have an estimate.
   virtual QuicBandwidth BandwidthEstimate() const = 0;
-
-  // Get the send algorithm specific retransmission delay, called RTO in TCP,
-  // Note 1: the caller is responsible for sanity checking this value.
-  // Note 2: this will return zero if we don't have enough data for an estimate.
-  virtual QuicTime::Delta RetransmissionDelay() const = 0;
 
   // Returns the size of the current congestion window in bytes.  Note, this is
   // not the *available* window.  Some send algorithms may not use a congestion
@@ -105,18 +99,21 @@ class NET_EXPORT_PRIVATE SendAlgorithmInterface {
   // Whether the send algorithm is currently in recovery.
   virtual bool InRecovery() const = 0;
 
+  // True when the congestion control is probing for more bandwidth and needs
+  // enough data to not be app-limited to do so.
+  virtual bool IsProbingForMoreBandwidth() const = 0;
+
   // Returns the size of the slow start congestion window in bytes,
-  // aka ssthresh.  Some send algorithms do not define a slow start
-  // threshold and will return 0.
+  // aka ssthresh.  Only defined for Cubic and Reno, other algorithms return 0.
   virtual QuicByteCount GetSlowStartThreshold() const = 0;
 
   virtual CongestionControlType GetCongestionControlType() const = 0;
 
-  // Called by the Session when we get a bandwidth estimate from the client.
-  // Uses the max bandwidth in the params if |max_bandwidth_resumption| is true.
-  virtual void ResumeConnectionState(
-      const CachedNetworkParameters& cached_network_params,
-      bool max_bandwidth_resumption) = 0;
+  // Notifies the congestion control algorithm of an external network
+  // measurement or prediction.  Either |bandwidth| or |rtt| may be zero if no
+  // sample is available.
+  virtual void AdjustNetworkParameters(QuicBandwidth bandwidth,
+                                       QuicTime::Delta rtt) = 0;
 
   // Retrieves debugging information about the current state of the
   // send algorithm.
@@ -139,4 +136,4 @@ class NET_EXPORT_PRIVATE SendAlgorithmInterface {
 
 }  // namespace net
 
-#endif  // NET_QUIC_CONGESTION_CONTROL_SEND_ALGORITHM_INTERFACE_H_
+#endif  // NET_QUIC_CORE_CONGESTION_CONTROL_SEND_ALGORITHM_INTERFACE_H_

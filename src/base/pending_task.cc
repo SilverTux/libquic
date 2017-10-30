@@ -4,30 +4,31 @@
 
 #include "base/pending_task.h"
 
-#include "base/tracked_objects.h"
+#include "base/message_loop/message_loop.h"
 
 namespace base {
 
-PendingTask::PendingTask(const tracked_objects::Location& posted_from,
-                         base::Closure task)
-    : base::TrackingInfo(posted_from, TimeTicks()),
-      task(std::move(task)),
-      posted_from(posted_from),
-      sequence_num(0),
-      nestable(true),
-      is_high_res(false) {
-}
-
-PendingTask::PendingTask(const tracked_objects::Location& posted_from,
-                         base::Closure task,
+PendingTask::PendingTask(const Location& posted_from,
+                         OnceClosure task,
                          TimeTicks delayed_run_time,
-                         bool nestable)
-    : base::TrackingInfo(posted_from, delayed_run_time),
-      task(std::move(task)),
+                         Nestable nestable)
+    : task(std::move(task)),
       posted_from(posted_from),
+      delayed_run_time(delayed_run_time),
       sequence_num(0),
       nestable(nestable),
       is_high_res(false) {
+  const PendingTask* parent_task =
+      MessageLoop::current() ? MessageLoop::current()->current_pending_task_
+                             : nullptr;
+  if (parent_task) {
+    task_backtrace[0] = parent_task->posted_from.program_counter();
+    std::copy(parent_task->task_backtrace.begin(),
+              parent_task->task_backtrace.end() - 1,
+              task_backtrace.begin() + 1);
+  } else {
+    task_backtrace.fill(nullptr);
+  }
 }
 
 PendingTask::PendingTask(PendingTask&& other) = default;

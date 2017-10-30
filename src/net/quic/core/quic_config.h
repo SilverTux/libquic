@@ -2,16 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef NET_QUIC_QUIC_CONFIG_H_
-#define NET_QUIC_QUIC_CONFIG_H_
+#ifndef NET_QUIC_CORE_QUIC_CONFIG_H_
+#define NET_QUIC_CORE_QUIC_CONFIG_H_
 
-#include <stddef.h>
-#include <stdint.h>
-
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
-#include "net/quic/core/quic_protocol.h"
+#include "net/base/int128.h"
+#include "net/quic/core/quic_packets.h"
 #include "net/quic/core/quic_time.h"
+#include "net/quic/platform/api/quic_export.h"
 
 namespace net {
 
@@ -40,7 +41,7 @@ enum HelloType {
 
 // An abstract base class that stores a value that can be sent in CHLO/SHLO
 // message. These values can be OPTIONAL or REQUIRED, depending on |presence_|.
-class NET_EXPORT_PRIVATE QuicConfigValue {
+class QUIC_EXPORT_PRIVATE QuicConfigValue {
  public:
   QuicConfigValue(QuicTag tag, QuicConfigPresence presence);
   virtual ~QuicConfigValue();
@@ -60,7 +61,7 @@ class NET_EXPORT_PRIVATE QuicConfigValue {
   const QuicConfigPresence presence_;
 };
 
-class NET_EXPORT_PRIVATE QuicNegotiableValue : public QuicConfigValue {
+class QUIC_EXPORT_PRIVATE QuicNegotiableValue : public QuicConfigValue {
  public:
   QuicNegotiableValue(QuicTag tag, QuicConfigPresence presence);
   ~QuicNegotiableValue() override;
@@ -74,7 +75,7 @@ class NET_EXPORT_PRIVATE QuicNegotiableValue : public QuicConfigValue {
   bool negotiated_;
 };
 
-class NET_EXPORT_PRIVATE QuicNegotiableUint32 : public QuicNegotiableValue {
+class QUIC_EXPORT_PRIVATE QuicNegotiableUint32 : public QuicNegotiableValue {
   // TODO(fayang): some negotiated values use uint32 as bool (e.g., silent
   // close). Consider adding a QuicNegotiableBool type.
  public:
@@ -91,6 +92,9 @@ class NET_EXPORT_PRIVATE QuicNegotiableUint32 : public QuicNegotiableValue {
   // Returns the value negotiated if |negotiated_| is true, otherwise returns
   // default_value_ (used to set default values before negotiation finishes).
   uint32_t GetUint32() const;
+
+  // Returns the maximum value negotiable.
+  uint32_t GetMax() const;
 
   // Serialises |name_| and value to |out|. If |negotiated_| is true then
   // |negotiated_value_| is serialised, otherwise |max_value_| is serialised.
@@ -110,44 +114,8 @@ class NET_EXPORT_PRIVATE QuicNegotiableUint32 : public QuicNegotiableValue {
   uint32_t negotiated_value_;
 };
 
-class NET_EXPORT_PRIVATE QuicNegotiableTag : public QuicNegotiableValue {
- public:
-  QuicNegotiableTag(QuicTag name, QuicConfigPresence presence);
-  ~QuicNegotiableTag() override;
-
-  // Sets the possible values that |negotiated_tag_| can take after negotiation
-  // and the default value that |negotiated_tag_| takes if OPTIONAL and *HLO
-  // msg doesn't contain tag |name_|.
-  void set(const QuicTagVector& possible_values, QuicTag default_value);
-
-  // Serialises |name_| and vector (either possible or negotiated) to |out|. If
-  // |negotiated_| is true then |negotiated_tag_| is serialised, otherwise
-  // |possible_values_| is serialised.
-  void ToHandshakeMessage(CryptoHandshakeMessage* out) const override;
-
-  // Selects the tag common to both tags in |client_hello| for |name_| and
-  // |possible_values_| with preference to tag in |possible_values_|. The
-  // selected tag is set as |negotiated_tag_|.
-  QuicErrorCode ProcessPeerHello(const CryptoHandshakeMessage& peer_hello,
-                                 HelloType hello_type,
-                                 std::string* error_details) override;
-
- private:
-  // Reads the vector corresponding to |name_| from |msg| into |out|. If the
-  // |name_| is absent in |msg| and |presence_| is set to OPTIONAL |out| is set
-  // to |possible_values_|.
-  QuicErrorCode ReadVector(const CryptoHandshakeMessage& msg,
-                           const QuicTag** out,
-                           size_t* out_length,
-                           std::string* error_details) const;
-
-  QuicTag negotiated_tag_;
-  QuicTagVector possible_values_;
-  QuicTag default_value_;
-};
-
 // Stores uint32_t from CHLO or SHLO messages that are not negotiated.
-class NET_EXPORT_PRIVATE QuicFixedUint32 : public QuicConfigValue {
+class QUIC_EXPORT_PRIVATE QuicFixedUint32 : public QuicConfigValue {
  public:
   QuicFixedUint32(QuicTag name, QuicConfigPresence presence);
   ~QuicFixedUint32() override;
@@ -179,8 +147,41 @@ class NET_EXPORT_PRIVATE QuicFixedUint32 : public QuicConfigValue {
   bool has_receive_value_;
 };
 
+// Stores uint128 from CHLO or SHLO messages that are not negotiated.
+class QUIC_EXPORT_PRIVATE QuicFixedUint128 : public QuicConfigValue {
+ public:
+  QuicFixedUint128(QuicTag tag, QuicConfigPresence presence);
+  ~QuicFixedUint128() override;
+
+  bool HasSendValue() const;
+
+  uint128 GetSendValue() const;
+
+  void SetSendValue(uint128 value);
+
+  bool HasReceivedValue() const;
+
+  uint128 GetReceivedValue() const;
+
+  void SetReceivedValue(uint128 value);
+
+  // If has_send_value is true, serialises |tag_| and |send_value_| to |out|.
+  void ToHandshakeMessage(CryptoHandshakeMessage* out) const override;
+
+  // Sets |value_| to the corresponding value from |peer_hello_| if it exists.
+  QuicErrorCode ProcessPeerHello(const CryptoHandshakeMessage& peer_hello,
+                                 HelloType hello_type,
+                                 std::string* error_details) override;
+
+ private:
+  uint128 send_value_;
+  bool has_send_value_;
+  uint128 receive_value_;
+  bool has_receive_value_;
+};
+
 // Stores tag from CHLO or SHLO messages that are not negotiated.
-class NET_EXPORT_PRIVATE QuicFixedTagVector : public QuicConfigValue {
+class QUIC_EXPORT_PRIVATE QuicFixedTagVector : public QuicConfigValue {
  public:
   QuicFixedTagVector(QuicTag name, QuicConfigPresence presence);
   QuicFixedTagVector(const QuicFixedTagVector& other);
@@ -215,23 +216,23 @@ class NET_EXPORT_PRIVATE QuicFixedTagVector : public QuicConfigValue {
   bool has_receive_values_;
 };
 
-// Stores IPEndPoint from CHLO or SHLO messages that are not negotiated.
-class NET_EXPORT_PRIVATE QuicFixedIPEndPoint : public QuicConfigValue {
+// Stores QuicSocketAddress from CHLO or SHLO messages that are not negotiated.
+class QUIC_EXPORT_PRIVATE QuicFixedSocketAddress : public QuicConfigValue {
  public:
-  QuicFixedIPEndPoint(QuicTag tag, QuicConfigPresence presence);
-  ~QuicFixedIPEndPoint() override;
+  QuicFixedSocketAddress(QuicTag tag, QuicConfigPresence presence);
+  ~QuicFixedSocketAddress() override;
 
   bool HasSendValue() const;
 
-  const IPEndPoint& GetSendValue() const;
+  const QuicSocketAddress& GetSendValue() const;
 
-  void SetSendValue(const IPEndPoint& value);
+  void SetSendValue(const QuicSocketAddress& value);
 
   bool HasReceivedValue() const;
 
-  const IPEndPoint& GetReceivedValue() const;
+  const QuicSocketAddress& GetReceivedValue() const;
 
-  void SetReceivedValue(const IPEndPoint& value);
+  void SetReceivedValue(const QuicSocketAddress& value);
 
   void ToHandshakeMessage(CryptoHandshakeMessage* out) const override;
 
@@ -240,15 +241,15 @@ class NET_EXPORT_PRIVATE QuicFixedIPEndPoint : public QuicConfigValue {
                                  std::string* error_details) override;
 
  private:
-  IPEndPoint send_value_;
+  QuicSocketAddress send_value_;
   bool has_send_value_;
-  IPEndPoint receive_value_;
+  QuicSocketAddress receive_value_;
   bool has_receive_value_;
 };
 
 // QuicConfig contains non-crypto configuration options that are negotiated in
 // the crypto handshake.
-class NET_EXPORT_PRIVATE QuicConfig {
+class QUIC_EXPORT_PRIVATE QuicConfig {
  public:
   QuicConfig();
   QuicConfig(const QuicConfig& other);
@@ -273,14 +274,23 @@ class NET_EXPORT_PRIVATE QuicConfig {
 
   // Returns true if the client is sending or the server has received a
   // connection option.
+  // TODO(ianswett): Rename to HasClientRequestedSharedOption
   bool HasClientSentConnectionOption(QuicTag tag,
                                      Perspective perspective) const;
 
-  void SetIdleConnectionStateLifetime(
-      QuicTime::Delta max_idle_connection_state_lifetime,
-      QuicTime::Delta default_idle_conection_state_lifetime);
+  void SetClientConnectionOptions(
+      const QuicTagVector& client_connection_options);
 
-  QuicTime::Delta IdleConnectionStateLifetime() const;
+  // Returns true if the client has requested the specified connection option.
+  // Checks the client connection options if the |perspective| is client and
+  // connection options if the |perspective| is the server.
+  bool HasClientRequestedIndependentOption(QuicTag tag,
+                                           Perspective perspective) const;
+
+  void SetIdleNetworkTimeout(QuicTime::Delta max_idle_network_timeout,
+                             QuicTime::Delta default_idle_network_timeout);
+
+  QuicTime::Delta IdleNetworkTimeout() const;
 
   void SetSilentClose(bool silent_close);
 
@@ -316,6 +326,10 @@ class NET_EXPORT_PRIVATE QuicConfig {
 
   QuicTime::Delta max_idle_time_before_crypto_handshake() const {
     return max_idle_time_before_crypto_handshake_;
+  }
+
+  QuicNegotiableUint32 idle_network_timeout_seconds() const {
+    return idle_network_timeout_seconds_;
   }
 
   void set_max_undecryptable_packets(size_t max_undecryptable_packets) {
@@ -364,31 +378,26 @@ class NET_EXPORT_PRIVATE QuicConfig {
 
   uint32_t ReceivedInitialSessionFlowControlWindowBytes() const;
 
-  // Sets socket receive buffer to transmit to the peer.
-  void SetSocketReceiveBufferToSend(uint32_t window_bytes);
-
-  bool HasReceivedSocketReceiveBuffer() const;
-
-  uint32_t ReceivedSocketReceiveBuffer() const;
-
-  void SetMultipathEnabled(bool multipath_enabled);
-
-  bool MultipathEnabled() const;
-
   void SetDisableConnectionMigration();
 
   bool DisableConnectionMigration() const;
 
   void SetAlternateServerAddressToSend(
-      const IPEndPoint& alternate_server_address);
+      const QuicSocketAddress& alternate_server_address);
 
   bool HasReceivedAlternateServerAddress() const;
 
-  const IPEndPoint& ReceivedAlternateServerAddress() const;
+  const QuicSocketAddress& ReceivedAlternateServerAddress() const;
 
-  void SetForceHolBlocking();
+  void SetSupportMaxHeaderListSize();
 
-  bool ForceHolBlocking(Perspective perspective) const;
+  bool SupportMaxHeaderListSize() const;
+
+  void SetStatelessResetTokenToSend(uint128 stateless_reset_token);
+
+  bool HasReceivedStatelessResetToken() const;
+
+  uint128 ReceivedStatelessResetToken() const;
 
   bool negotiated() const;
 
@@ -416,10 +425,13 @@ class NET_EXPORT_PRIVATE QuicConfig {
   // Maximum number of undecryptable packets stored before CHLO/SHLO.
   size_t max_undecryptable_packets_;
 
-  // Connection options.
+  // Connection options which affect the server side.  May also affect the
+  // client side in cases when identical behavior is desirable.
   QuicFixedTagVector connection_options_;
-  // Idle connection state lifetime
-  QuicNegotiableUint32 idle_connection_state_lifetime_seconds_;
+  // Connection options which only affect the client side.
+  QuicFixedTagVector client_connection_options_;
+  // Idle network timeout in seconds.
+  QuicNegotiableUint32 idle_network_timeout_seconds_;
   // Whether to use silent close.  Defaults to 0 (false) and is otherwise true.
   QuicNegotiableUint32 silent_close_;
   // Maximum number of streams that the connection can support.
@@ -441,19 +453,19 @@ class NET_EXPORT_PRIVATE QuicConfig {
   // TODO(ianswett): Deprecate once QUIC_VERSION_34 is deprecated.
   QuicFixedUint32 socket_receive_buffer_;
 
-  // Whether to support multipath for this connection.
-  QuicNegotiableUint32 multipath_enabled_;
-
   // Whether tell peer not to attempt connection migration.
   QuicFixedUint32 connection_migration_disabled_;
 
   // An alternate server address the client could connect to.
-  QuicFixedIPEndPoint alternate_server_address_;
+  QuicFixedSocketAddress alternate_server_address_;
 
-  // Force HOL blocking for measurement purposes.
-  QuicFixedUint32 force_hol_blocking_;
+  // Whether support HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE SETTINGS frame.
+  QuicFixedUint32 support_max_header_list_size_;
+
+  // Stateless reset token used in IETF public reset packet.
+  QuicFixedUint128 stateless_reset_token_;
 };
 
 }  // namespace net
 
-#endif  // NET_QUIC_QUIC_CONFIG_H_
+#endif  // NET_QUIC_CORE_QUIC_CONFIG_H_

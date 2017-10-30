@@ -9,11 +9,14 @@
 #include <utility>
 
 #include "base/logging.h"
+#include "base/memory/ptr_util.h"
 #include "base/task_scheduler/task_tracker.h"
-#include "build/build_config.h"
 
 #if defined(OS_MACOSX)
 #include "base/mac/scoped_nsautorelease_pool.h"
+#elif defined(OS_WIN)
+#include "base/win/com_init_check_hook.h"
+#include "base/win/scoped_com_initializer.h"
 #endif
 
 namespace base {
@@ -23,8 +26,8 @@ class SchedulerWorker::Thread : public PlatformThread::Delegate {
  public:
   ~Thread() override = default;
 
-  static std::unique_ptr<Thread> Create(SchedulerWorker* outer) {
-    std::unique_ptr<Thread> thread(new Thread(outer));
+  static std::unique_ptr<Thread> Create(scoped_refptr<SchedulerWorker> outer) {
+    std::unique_ptr<Thread> thread(new Thread(std::move(outer)));
     thread->Initialize();
     if (thread->thread_handle_.is_null())
       return nullptr;
@@ -33,19 +36,23 @@ class SchedulerWorker::Thread : public PlatformThread::Delegate {
 
   // PlatformThread::Delegate.
   void ThreadMain() override {
-    // Set if this thread was detached.
-    std::unique_ptr<Thread> detached_thread;
-
-    outer_->delegate_->OnMainEntry(
-        outer_, outer_->last_detach_time_.is_null()
-                    ? TimeDelta::Max()
-                    : TimeTicks::Now() - outer_->last_detach_time_);
+    outer_->delegate_->OnMainEntry(outer_.get());
 
     // A SchedulerWorker starts out waiting for work.
-    WaitForWork();
+    outer_->delegate_->WaitForWork(&wake_up_event_);
 
-    while (!outer_->task_tracker_->IsShutdownComplete() &&
-           !outer_->ShouldExitForTesting()) {
+    // When defined(COM_INIT_CHECK_HOOK_ENABLED), ignore
+    // SchedulerBackwardCompatibility::INIT_COM_STA to find incorrect uses of
+    // COM that should be running in a COM STA Task Runner.
+#if defined(OS_WIN) && !defined(COM_INIT_CHECK_HOOK_ENABLED)
+    std::unique_ptr<win::ScopedCOMInitializer> com_initializer;
+    if (outer_->backward_compatibility_ ==
+        SchedulerBackwardCompatibility::INIT_COM_STA) {
+      com_initializer = std::make_unique<win::ScopedCOMInitializer>();
+    }
+#endif
+
+    while (!outer_->ShouldExit()) {
       DCHECK(outer_);
 
 #if defined(OS_MACOSX)
@@ -55,34 +62,20 @@ class SchedulerWorker::Thread : public PlatformThread::Delegate {
       UpdateThreadPriority(GetDesiredThreadPriority());
 
       // Get the sequence containing the next task to execute.
-      scoped_refptr<Sequence> sequence = outer_->delegate_->GetWork(outer_);
+      scoped_refptr<Sequence> sequence =
+          outer_->delegate_->GetWork(outer_.get());
       if (!sequence) {
-        if (outer_->delegate_->CanDetach(outer_)) {
-          detached_thread = outer_->Detach();
-          if (detached_thread) {
-            DCHECK_EQ(detached_thread.get(), this);
-            PlatformThread::Detach(thread_handle_);
-            outer_ = nullptr;
-            break;
-          }
-        }
-        WaitForWork();
+        outer_->delegate_->WaitForWork(&wake_up_event_);
         continue;
       }
 
-      const Task* task = sequence->PeekTask();
-      const TimeTicks start_time = TimeTicks::Now();
-      if (outer_->task_tracker_->RunTask(task, sequence->token()))
-        outer_->delegate_->DidRunTask(task, start_time - task->sequenced_time);
+      sequence = outer_->task_tracker_->RunNextTask(std::move(sequence),
+                                                    outer_->delegate_.get());
 
-      const bool sequence_became_empty = sequence->PopTask();
+      outer_->delegate_->DidRunTask();
 
-      // If |sequence| isn't empty immediately after the pop, re-enqueue it to
-      // maintain the invariant that a non-empty Sequence is always referenced
-      // by either a PriorityQueue or a SchedulerWorker. If it is empty
-      // and there are live references to it, it will be enqueued when a Task is
-      // added to it. Otherwise, it will be destroyed at the end of this scope.
-      if (!sequence_became_empty)
+      // Re-enqueue |sequence| if allowed by RunNextTask().
+      if (sequence)
         outer_->delegate_->ReEnqueueSequence(std::move(sequence));
 
       // Calling WakeUp() guarantees that this SchedulerWorker will run
@@ -93,23 +86,23 @@ class SchedulerWorker::Thread : public PlatformThread::Delegate {
       wake_up_event_.Reset();
     }
 
-    // If a wake up is pending and we successfully detached, somehow |outer_|
-    // was able to signal us which means it probably thinks we're still alive.
-    // This is bad as it will cause the WakeUp to no-op and |outer_| will be
-    // stuck forever.
-    DCHECK(!detached_thread || !IsWakeUpPending()) <<
-        "This thread was detached and woken up at the same time.";
+    outer_->delegate_->OnMainExit(outer_.get());
+
+    // Break the ownership circle between SchedulerWorker and Thread.
+    // This can result in deleting |this| and as such no more member accesses
+    // should be made after this point.
+    outer_ = nullptr;
   }
 
   void Join() { PlatformThread::Join(thread_handle_); }
 
+  void Detach() { PlatformThread::Detach(thread_handle_); }
+
   void WakeUp() { wake_up_event_.Signal(); }
 
-  bool IsWakeUpPending() { return wake_up_event_.IsSignaled(); }
-
  private:
-  Thread(SchedulerWorker* outer)
-      : outer_(outer),
+  Thread(scoped_refptr<SchedulerWorker> outer)
+      : outer_(std::move(outer)),
         wake_up_event_(WaitableEvent::ResetPolicy::MANUAL,
                        WaitableEvent::InitialState::NOT_SIGNALED),
         current_thread_priority_(GetDesiredThreadPriority()) {
@@ -120,19 +113,6 @@ class SchedulerWorker::Thread : public PlatformThread::Delegate {
     constexpr size_t kDefaultStackSize = 0;
     PlatformThread::CreateWithPriority(kDefaultStackSize, this, &thread_handle_,
                                        current_thread_priority_);
-  }
-
-  void WaitForWork() {
-    DCHECK(outer_);
-    const TimeDelta sleep_time = outer_->delegate_->GetSleepTimeout();
-    if (sleep_time.is_max()) {
-      // Calling TimedWait with TimeDelta::Max is not recommended per
-      // http://crbug.com/465948.
-      wake_up_event_.Wait();
-    } else {
-      wake_up_event_.TimedWait(sleep_time);
-    }
-    wake_up_event_.Reset();
   }
 
   // Returns the priority for which the thread should be set based on the
@@ -168,7 +148,7 @@ class SchedulerWorker::Thread : public PlatformThread::Delegate {
 
   PlatformThreadHandle thread_handle_;
 
-  SchedulerWorker* outer_;
+  scoped_refptr<SchedulerWorker> outer_;
 
   // Event signaled to wake up this thread.
   WaitableEvent wake_up_event_;
@@ -180,57 +160,79 @@ class SchedulerWorker::Thread : public PlatformThread::Delegate {
   DISALLOW_COPY_AND_ASSIGN(Thread);
 };
 
-std::unique_ptr<SchedulerWorker> SchedulerWorker::Create(
+void SchedulerWorker::Delegate::WaitForWork(WaitableEvent* wake_up_event) {
+  DCHECK(wake_up_event);
+  const TimeDelta sleep_time = GetSleepTimeout();
+  if (sleep_time.is_max()) {
+    // Calling TimedWait with TimeDelta::Max is not recommended per
+    // http://crbug.com/465948.
+    wake_up_event->Wait();
+  } else {
+    wake_up_event->TimedWait(sleep_time);
+  }
+  wake_up_event->Reset();
+}
+
+SchedulerWorker::SchedulerWorker(
     ThreadPriority priority_hint,
     std::unique_ptr<Delegate> delegate,
     TaskTracker* task_tracker,
-    InitialState initial_state) {
-  std::unique_ptr<SchedulerWorker> worker(
-      new SchedulerWorker(priority_hint, std::move(delegate), task_tracker));
-  // Creation happens before any other thread can reference this one, so no
-  // synchronization is necessary.
-  if (initial_state == SchedulerWorker::InitialState::ALIVE) {
-    worker->CreateThread();
-    if (!worker->thread_) {
-      return nullptr;
-    }
-  }
-
-  return worker;
+    const SchedulerLock* predecessor_lock,
+    SchedulerBackwardCompatibility backward_compatibility)
+    : thread_lock_(predecessor_lock),
+      priority_hint_(priority_hint),
+      delegate_(std::move(delegate)),
+      task_tracker_(task_tracker)
+#if defined(OS_WIN) && !defined(COM_INIT_CHECK_HOOK_ENABLED)
+      ,
+      backward_compatibility_(backward_compatibility)
+#endif
+{
+  DCHECK(delegate_);
+  DCHECK(task_tracker_);
 }
 
-SchedulerWorker::~SchedulerWorker() {
-  // It is unexpected for |thread_| to be alive and for SchedulerWorker to
-  // destroy since SchedulerWorker owns the delegate needed by |thread_|.
-  // For testing, this generally means JoinForTesting was not called.
+bool SchedulerWorker::Start() {
+  AutoSchedulerLock auto_lock(thread_lock_);
   DCHECK(!thread_);
+
+  if (should_exit_.IsSet())
+    return true;
+
+  thread_ = Thread::Create(WrapRefCounted(this));
+  return !!thread_;
 }
 
 void SchedulerWorker::WakeUp() {
   AutoSchedulerLock auto_lock(thread_lock_);
-  if (!thread_)
-    CreateThreadAssertSynchronized();
 
+  DCHECK(!join_called_for_testing_.IsSet());
+  // Calling WakeUp() after Cleanup() is wrong because the SchedulerWorker
+  // cannot run more tasks.
+  DCHECK(!should_exit_.IsSet());
   if (thread_)
     thread_->WakeUp();
 }
 
 void SchedulerWorker::JoinForTesting() {
+  DCHECK(!join_called_for_testing_.IsSet());
+  join_called_for_testing_.Set();
+
+  std::unique_ptr<Thread> thread;
+
   {
-    AutoSchedulerLock auto_lock(should_exit_for_testing_lock_);
-    should_exit_for_testing_ = true;
+    AutoSchedulerLock auto_lock(thread_lock_);
+
+    if (thread_) {
+      // Make sure the thread is awake. It will see that
+      // |join_called_for_testing_| is set and exit shortly after.
+      thread_->WakeUp();
+      thread = std::move(thread_);
+    }
   }
-  WakeUp();
 
-  // Normally holding a lock and joining is dangerous. However, since this is
-  // only for testing, we're okay since the only scenario that could impact this
-  // is a call to Detach, which is disallowed by having the delegate always
-  // return false for the CanDetach call.
-  AutoSchedulerLock auto_lock(thread_lock_);
-  if (thread_)
-    thread_->Join();
-
-  thread_.reset();
+  if (thread)
+    thread->Join();
 }
 
 bool SchedulerWorker::ThreadAliveForTesting() const {
@@ -238,40 +240,31 @@ bool SchedulerWorker::ThreadAliveForTesting() const {
   return !!thread_;
 }
 
-SchedulerWorker::SchedulerWorker(ThreadPriority priority_hint,
-                                 std::unique_ptr<Delegate> delegate,
-                                 TaskTracker* task_tracker)
-    : priority_hint_(priority_hint),
-      delegate_(std::move(delegate)),
-      task_tracker_(task_tracker) {
-  DCHECK(delegate_);
-  DCHECK(task_tracker_);
+SchedulerWorker::~SchedulerWorker() {
+  if (thread_) {
+    if (join_called_for_testing_.IsSet())
+      return;
+
+    DCHECK(should_exit_.IsSet());
+    thread_->Detach();
+  }
 }
 
-std::unique_ptr<SchedulerWorker::Thread> SchedulerWorker::Detach() {
-  DCHECK(!ShouldExitForTesting()) << "Worker was already joined";
+void SchedulerWorker::Cleanup() {
   AutoSchedulerLock auto_lock(thread_lock_);
-  // If a wakeup is pending, then a WakeUp() came in while we were deciding to
-  // detach. This means we can't go away anymore since we would break the
-  // guarantee that we call GetWork() after a successful wakeup.
-  if (thread_->IsWakeUpPending())
-    return nullptr;
-  last_detach_time_ = TimeTicks::Now();
-  return std::move(thread_);
+  DCHECK(!should_exit_.IsSet());
+  should_exit_.Set();
+  if (thread_)
+    thread_->WakeUp();
 }
 
-void SchedulerWorker::CreateThread() {
-  thread_ = Thread::Create(this);
-}
-
-void SchedulerWorker::CreateThreadAssertSynchronized() {
-  thread_lock_.AssertAcquired();
-  CreateThread();
-}
-
-bool SchedulerWorker::ShouldExitForTesting() const {
-  AutoSchedulerLock auto_lock(should_exit_for_testing_lock_);
-  return should_exit_for_testing_;
+bool SchedulerWorker::ShouldExit() const {
+  // The ordering of the checks is important below. This SchedulerWorker may be
+  // released and outlive |task_tracker_| in unit tests. However, when the
+  // SchedulerWorker is released, |should_exit_| will be set, so check that
+  // first.
+  return should_exit_.IsSet() || join_called_for_testing_.IsSet() ||
+         task_tracker_->IsShutdownComplete();
 }
 
 }  // namespace internal

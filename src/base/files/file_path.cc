@@ -174,6 +174,7 @@ FilePath::FilePath() {
 
 FilePath::FilePath(const FilePath& that) : path_(that.path_) {
 }
+FilePath::FilePath(FilePath&& that) noexcept = default;
 
 FilePath::FilePath(StringPieceType path) {
   path.CopyToString(&path_);
@@ -190,6 +191,8 @@ FilePath& FilePath::operator=(const FilePath& that) {
   return *this;
 }
 
+FilePath& FilePath::operator=(FilePath&& that) = default;
+
 bool FilePath::operator==(const FilePath& that) const {
 #if defined(FILE_PATH_USES_DRIVE_LETTERS)
   return EqualDriveLetterCaseInsensitive(this->path_, that.path_);
@@ -204,6 +207,10 @@ bool FilePath::operator!=(const FilePath& that) const {
 #else  // defined(FILE_PATH_USES_DRIVE_LETTERS)
   return path_ != that.path_;
 #endif  // defined(FILE_PATH_USES_DRIVE_LETTERS)
+}
+
+std::ostream& operator<<(std::ostream& out, const FilePath& file_path) {
+  return out << file_path.value();
 }
 
 // static
@@ -485,7 +492,7 @@ FilePath FilePath::Append(StringPieceType component) const {
 
   DCHECK(!IsPathAbsolute(appended));
 
-  if (path_.compare(kCurrentDirectory) == 0) {
+  if (path_.compare(kCurrentDirectory) == 0 && !appended.empty()) {
     // Append normally doesn't do any normalization, but as a special case,
     // when appending to kCurrentDirectory, just return a new path for the
     // component argument.  Appending component to kCurrentDirectory would
@@ -560,6 +567,12 @@ FilePath FilePath::StripTrailingSeparators() const {
 }
 
 bool FilePath::ReferencesParent() const {
+  if (path_.find(kParentDirectory) == StringType::npos) {
+    // GetComponents is quite expensive, so avoid calling it in the majority
+    // of cases where there isn't a kParentDirectory anywhere in the path.
+    return false;
+  }
+
   std::vector<StringType> components;
   GetComponents(&components);
 
@@ -656,14 +669,6 @@ FilePath FilePath::FromUTF16Unsafe(StringPiece16 utf16) {
   return FilePath(utf16);
 }
 #endif
-
-void FilePath::GetSizeForPickle(PickleSizer* sizer) const {
-#if defined(OS_WIN)
-  sizer->AddString16(path_);
-#else
-  sizer->AddString(path_);
-#endif
-}
 
 void FilePath::WriteToPickle(Pickle* pickle) const {
 #if defined(OS_WIN)

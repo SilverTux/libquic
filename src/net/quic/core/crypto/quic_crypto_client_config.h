@@ -2,23 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef NET_QUIC_CRYPTO_QUIC_CRYPTO_CLIENT_CONFIG_H_
-#define NET_QUIC_CRYPTO_QUIC_CRYPTO_CLIENT_CONFIG_H_
+#ifndef NET_QUIC_CORE_CRYPTO_QUIC_CRYPTO_CLIENT_CONFIG_H_
+#define NET_QUIC_CORE_CRYPTO_QUIC_CRYPTO_CLIENT_CONFIG_H_
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <map>
 #include <memory>
-#include <queue>
 #include <string>
 #include <vector>
 
 #include "base/macros.h"
-#include "base/strings/string_piece.h"
-#include "net/base/net_export.h"
 #include "net/quic/core/crypto/crypto_handshake.h"
-#include "net/quic/core/quic_protocol.h"
+#include "net/quic/core/quic_packets.h"
 #include "net/quic/core/quic_server_id.h"
+#include "net/quic/platform/api/quic_export.h"
+#include "net/quic/platform/api/quic_reference_counted.h"
+#include "net/quic/platform/api/quic_string_piece.h"
 
 namespace net {
 
@@ -32,12 +31,12 @@ class QuicRandom;
 // QuicCryptoClientConfig contains crypto-related configuration settings for a
 // client. Note that this object isn't thread-safe. It's designed to be used on
 // a single thread at a time.
-class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
+class QUIC_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
  public:
   // A CachedState contains the information that the client needs in order to
   // perform a 0-RTT handshake with a server. This information can be reused
   // over several connections to the same server.
-  class NET_EXPORT_PRIVATE CachedState {
+  class QUIC_EXPORT_PRIVATE CachedState {
    public:
     // Enum to track if the server config is valid or not. If it is not valid,
     // it specifies why it is invalid.
@@ -76,7 +75,7 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
     // SetServerConfig checks that |server_config| parses correctly and stores
     // it in |server_config_|. |now| is used to judge whether |server_config|
     // has expired.
-    ServerConfigState SetServerConfig(base::StringPiece server_config,
+    ServerConfigState SetServerConfig(QuicStringPiece server_config,
                                       QuicWallTime now,
                                       QuicWallTime expiry_time,
                                       std::string* error_details);
@@ -84,11 +83,11 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
     // InvalidateServerConfig clears the cached server config (if any).
     void InvalidateServerConfig();
 
-    // SetProof stores a certificate chain and signature.
+    // SetProof stores a cert chain, cert signed timestamp and signature.
     void SetProof(const std::vector<std::string>& certs,
-                  base::StringPiece cert_sct,
-                  base::StringPiece chlo_hash,
-                  base::StringPiece signature);
+                  QuicStringPiece cert_sct,
+                  QuicStringPiece chlo_hash,
+                  QuicStringPiece signature);
 
     // Clears all the data.
     void Clear();
@@ -116,9 +115,9 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
     uint64_t generation_counter() const;
     const ProofVerifyDetails* proof_verify_details() const;
 
-    void set_source_address_token(base::StringPiece token);
+    void set_source_address_token(QuicStringPiece token);
 
-    void set_cert_sct(base::StringPiece cert_sct);
+    void set_cert_sct(QuicStringPiece cert_sct);
 
     // Adds the connection ID to the queue of server-designated connection-ids.
     void add_server_designated_connection_id(QuicConnectionId connection_id);
@@ -157,12 +156,12 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
 
     // Initializes this cached state based on the arguments provided.
     // Returns false if there is a problem parsing the server config.
-    bool Initialize(base::StringPiece server_config,
-                    base::StringPiece source_address_token,
+    bool Initialize(QuicStringPiece server_config,
+                    QuicStringPiece source_address_token,
                     const std::vector<std::string>& certs,
-                    base::StringPiece cert_sct,
-                    base::StringPiece chlo_hash,
-                    base::StringPiece signature,
+                    const std::string& cert_sct,
+                    QuicStringPiece chlo_hash,
+                    QuicStringPiece signature,
                     QuicWallTime now,
                     QuicWallTime expiration_time);
 
@@ -192,8 +191,8 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
     // TODO(jokulik): Consider using a hash-set as extra book-keeping to ensure
     // that no connection-id is added twice.  Also, consider keeping the server
     // nonces and connection_ids together in one queue.
-    std::queue<QuicConnectionId> server_designated_connection_ids_;
-    std::queue<std::string> server_nonces_;
+    QuicQueue<QuicConnectionId> server_designated_connection_ids_;
+    QuicQueue<std::string> server_nonces_;
 
     DISALLOW_COPY_AND_ASSIGN(CachedState);
   };
@@ -201,6 +200,8 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   // Used to filter server ids for partial config deletion.
   class ServerIdFilter {
    public:
+    virtual ~ServerIdFilter() {}
+
     // Returns true if |server_id| matches the filter.
     virtual bool Matches(const QuicServerId& server_id) const = 0;
   };
@@ -226,13 +227,14 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   // server to detect downgrade attacks.  If |demand_x509_proof| is true,
   // then |out| will include an X509 proof demand, and the associated
   // certificate related fields.
-  void FillInchoateClientHello(const QuicServerId& server_id,
-                               const QuicVersion preferred_version,
-                               const CachedState* cached,
-                               QuicRandom* rand,
-                               bool demand_x509_proof,
-                               QuicCryptoNegotiatedParameters* out_params,
-                               CryptoHandshakeMessage* out) const;
+  void FillInchoateClientHello(
+      const QuicServerId& server_id,
+      const QuicTransportVersion preferred_version,
+      const CachedState* cached,
+      QuicRandom* rand,
+      bool demand_x509_proof,
+      QuicReferenceCountedPointer<QuicCryptoNegotiatedParameters> out_params,
+      CryptoHandshakeMessage* out) const;
 
   // FillClientHello sets |out| to be a CHLO message based on the configuration
   // of this object. This object must have cached enough information about
@@ -248,17 +250,17 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   // If |channel_id_key| is not null, it is used to sign a secret value derived
   // from the client and server's keys, and the Channel ID public key and the
   // signature are placed in the CETV value of the CHLO.
-  QuicErrorCode FillClientHello(const QuicServerId& server_id,
-                                QuicConnectionId connection_id,
-                                const QuicVersion actual_version,
-                                const QuicVersion preferred_version,
-                                const CachedState* cached,
-                                QuicWallTime now,
-                                QuicRandom* rand,
-                                const ChannelIDKey* channel_id_key,
-                                QuicCryptoNegotiatedParameters* out_params,
-                                CryptoHandshakeMessage* out,
-                                std::string* error_details) const;
+  QuicErrorCode FillClientHello(
+      const QuicServerId& server_id,
+      QuicConnectionId connection_id,
+      const QuicTransportVersion preferred_version,
+      const CachedState* cached,
+      QuicWallTime now,
+      QuicRandom* rand,
+      const ChannelIDKey* channel_id_key,
+      QuicReferenceCountedPointer<QuicCryptoNegotiatedParameters> out_params,
+      CryptoHandshakeMessage* out,
+      std::string* error_details) const;
 
   // ProcessRejection processes a REJ message from a server and updates the
   // cached information about that server. After this, |IsComplete| may return
@@ -266,13 +268,14 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   // about a future handshake (i.e. an nonce value from the server), then it
   // will be saved in |out_params|. |now| is used to judge whether the server
   // config in the rejection message has expired.
-  QuicErrorCode ProcessRejection(const CryptoHandshakeMessage& rej,
-                                 QuicWallTime now,
-                                 QuicVersion version,
-                                 base::StringPiece chlo_hash,
-                                 CachedState* cached,
-                                 QuicCryptoNegotiatedParameters* out_params,
-                                 std::string* error_details);
+  QuicErrorCode ProcessRejection(
+      const CryptoHandshakeMessage& rej,
+      QuicWallTime now,
+      QuicTransportVersion version,
+      QuicStringPiece chlo_hash,
+      CachedState* cached,
+      QuicReferenceCountedPointer<QuicCryptoNegotiatedParameters> out_params,
+      std::string* error_details);
 
   // ProcessServerHello processes the message in |server_hello|, updates the
   // cached information about that server, writes the negotiated parameters to
@@ -283,13 +286,14 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   // present in a version negotiation packet previously recevied from the
   // server. The contents of this list will be compared against the list of
   // versions provided in the VER tag of the server hello.
-  QuicErrorCode ProcessServerHello(const CryptoHandshakeMessage& server_hello,
-                                   QuicConnectionId connection_id,
-                                   QuicVersion version,
-                                   const QuicVersionVector& negotiated_versions,
-                                   CachedState* cached,
-                                   QuicCryptoNegotiatedParameters* out_params,
-                                   std::string* error_details);
+  QuicErrorCode ProcessServerHello(
+      const CryptoHandshakeMessage& server_hello,
+      QuicConnectionId connection_id,
+      QuicTransportVersion version,
+      const QuicTransportVersionVector& negotiated_versions,
+      CachedState* cached,
+      QuicReferenceCountedPointer<QuicCryptoNegotiatedParameters> out_params,
+      std::string* error_details);
 
   // Processes the message in |server_update|, updating the cached source
   // address token, and server config.
@@ -299,10 +303,10 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   QuicErrorCode ProcessServerConfigUpdate(
       const CryptoHandshakeMessage& server_update,
       QuicWallTime now,
-      const QuicVersion version,
-      base::StringPiece chlo_hash,
+      const QuicTransportVersion version,
+      QuicStringPiece chlo_hash,
       CachedState* cached,
-      QuicCryptoNegotiatedParameters* out_params,
+      QuicReferenceCountedPointer<QuicCryptoNegotiatedParameters> out_params,
       std::string* error_details);
 
   ProofVerifier* proof_verifier() const;
@@ -338,9 +342,10 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
     user_agent_id_ = user_agent_id;
   }
 
- private:
-  typedef std::map<QuicServerId, CachedState*> CachedStateMap;
+  // Saves the |alpn| that will be passed in QUIC's CHLO message.
+  void set_alpn(const std::string& alpn) { alpn_ = alpn; }
 
+ private:
   // Sets the members to reasonable, default values.
   void SetDefaults();
 
@@ -351,8 +356,8 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   QuicErrorCode CacheNewServerConfig(
       const CryptoHandshakeMessage& message,
       QuicWallTime now,
-      const QuicVersion version,
-      base::StringPiece chlo_hash,
+      const QuicTransportVersion version,
+      QuicStringPiece chlo_hash,
       const std::vector<std::string>& cached_certs,
       CachedState* cached,
       std::string* error_details);
@@ -366,7 +371,7 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
 
   // cached_states_ maps from the server_id to the cached information about
   // that server.
-  CachedStateMap cached_states_;
+  std::map<QuicServerId, std::unique_ptr<CachedState>> cached_states_;
 
   // Contains a map of servers which could share the same server config. Map
   // from a canonical host suffix/port/scheme to a representative server with
@@ -384,9 +389,12 @@ class NET_EXPORT_PRIVATE QuicCryptoClientConfig : public QuicCryptoConfig {
   // The |user_agent_id_| passed in QUIC's CHLO message.
   std::string user_agent_id_;
 
+  // The |alpn_| passed in QUIC's CHLO message.
+  std::string alpn_;
+
   DISALLOW_COPY_AND_ASSIGN(QuicCryptoClientConfig);
 };
 
 }  // namespace net
 
-#endif  // NET_QUIC_CRYPTO_QUIC_CRYPTO_CLIENT_CONFIG_H_
+#endif  // NET_QUIC_CORE_CRYPTO_QUIC_CRYPTO_CLIENT_CONFIG_H_

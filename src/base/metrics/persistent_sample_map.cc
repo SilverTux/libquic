@@ -6,7 +6,9 @@
 
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/metrics/persistent_histogram_allocator.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/stl_util.h"
 
 namespace base {
@@ -15,6 +17,19 @@ typedef HistogramBase::Count Count;
 typedef HistogramBase::Sample Sample;
 
 namespace {
+
+enum NegativeSampleReason {
+  PERSISTENT_SPARSE_HAVE_LOGGED_BUT_NOT_SAMPLE,
+  PERSISTENT_SPARSE_SAMPLE_LESS_THAN_LOGGED,
+  PERSISTENT_SPARSE_ADDED_NEGATIVE_COUNT,
+  PERSISTENT_SPARSE_ADD_WENT_NEGATIVE,
+  PERSISTENT_SPARSE_ADD_OVERFLOW,
+  PERSISTENT_SPARSE_ACCUMULATE_NEGATIVE_COUNT,
+  PERSISTENT_SPARSE_ACCUMULATE_WENT_NEGATIVE,
+  DEPRECATED_PERSISTENT_SPARSE_ACCUMULATE_OVERFLOW,
+  PERSISTENT_SPARSE_ACCUMULATE_OVERFLOW,
+  MAX_NEGATIVE_SAMPLE_REASONS
+};
 
 // An iterator for going through a PersistentSampleMap. The logic here is
 // identical to that of SampleMapIterator but with different data structures.
@@ -31,7 +46,7 @@ class PersistentSampleMapIterator : public SampleCountIterator {
   bool Done() const override;
   void Next() override;
   void Get(HistogramBase::Sample* min,
-           HistogramBase::Sample* max,
+           int64_t* max,
            HistogramBase::Count* count) const override;
 
  private:
@@ -61,13 +76,13 @@ void PersistentSampleMapIterator::Next() {
 }
 
 void PersistentSampleMapIterator::Get(Sample* min,
-                                      Sample* max,
+                                      int64_t* max,
                                       Count* count) const {
   DCHECK(!Done());
   if (min)
     *min = iter_->first;
   if (max)
-    *max = iter_->first + 1;
+    *max = strict_cast<int64_t>(iter_->first) + 1;
   if (count)
     *count = *iter_->second;
 }
@@ -82,13 +97,16 @@ void PersistentSampleMapIterator::SkipEmptyBuckets() {
 // memory allocator. The "id" must be unique across all maps held by an
 // allocator or they will get attached to the wrong sample map.
 struct SampleRecord {
+  // SHA1(SampleRecord): Increment this if structure changes!
+  static constexpr uint32_t kPersistentTypeId = 0x8FE6A69F + 1;
+
+  // Expected size for 32/64-bit check.
+  static constexpr size_t kExpectedInstanceSize = 16;
+
   uint64_t id;   // Unique identifier of owner.
   Sample value;  // The value for which this record holds a count.
   Count count;   // The count associated with the above value.
 };
-
-// The type-id used to identify sample records inside an allocator.
-const uint32_t kTypeIdSampleRecord = 0x8FE6A69F + 1;  // SHA1(SampleRecord) v1
 
 }  // namespace
 
@@ -104,9 +122,33 @@ PersistentSampleMap::~PersistentSampleMap() {
 }
 
 void PersistentSampleMap::Accumulate(Sample value, Count count) {
+#if 0  // TODO(bcwhite) Re-enable efficient version after crbug.com/682680.
   *GetOrCreateSampleCountStorage(value) += count;
-  IncreaseSum(static_cast<int64_t>(count) * value);
-  IncreaseRedundantCount(count);
+#else
+  NegativeSampleReason reason = MAX_NEGATIVE_SAMPLE_REASONS;
+  Count* local_count_ptr = GetOrCreateSampleCountStorage(value);
+  if (count < 0) {
+    reason = PERSISTENT_SPARSE_ACCUMULATE_NEGATIVE_COUNT;
+    if (*local_count_ptr < -count)
+      reason = PERSISTENT_SPARSE_ACCUMULATE_WENT_NEGATIVE;
+    *local_count_ptr += count;
+  } else {
+    Sample old_value = *local_count_ptr;
+    Sample new_value = old_value + count;
+    *local_count_ptr = new_value;
+    if ((new_value >= 0) != (old_value >= 0))
+      reason = PERSISTENT_SPARSE_ACCUMULATE_OVERFLOW;
+  }
+  if (reason != MAX_NEGATIVE_SAMPLE_REASONS) {
+    UMA_HISTOGRAM_ENUMERATION("UMA.NegativeSamples.Reason", reason,
+                              MAX_NEGATIVE_SAMPLE_REASONS);
+    UMA_HISTOGRAM_CUSTOM_COUNTS("UMA.NegativeSamples.Increment", count, 1,
+                                1 << 30, 100);
+    UMA_HISTOGRAM_SPARSE_SLOWLY("UMA.NegativeSamples.Histogram",
+                                static_cast<int32_t>(id()));
+  }
+#endif
+  IncreaseSumAndCount(strict_cast<int64_t>(count) * value, count);
 }
 
 Count PersistentSampleMap::GetCount(Sample value) const {
@@ -141,15 +183,12 @@ PersistentMemoryAllocator::Reference
 PersistentSampleMap::GetNextPersistentRecord(
     PersistentMemoryAllocator::Iterator& iterator,
     uint64_t* sample_map_id) {
-  PersistentMemoryAllocator::Reference ref =
-      iterator.GetNextOfType(kTypeIdSampleRecord);
-  const SampleRecord* record =
-      iterator.GetAsObject<SampleRecord>(ref, kTypeIdSampleRecord);
+  const SampleRecord* record = iterator.GetNextOfObject<SampleRecord>();
   if (!record)
     return 0;
 
   *sample_map_id = record->id;
-  return ref;
+  return iterator.GetAsReference(record);
 }
 
 // static
@@ -158,11 +197,7 @@ PersistentSampleMap::CreatePersistentRecord(
     PersistentMemoryAllocator* allocator,
     uint64_t sample_map_id,
     Sample value) {
-  PersistentMemoryAllocator::Reference ref =
-      allocator->Allocate(sizeof(SampleRecord), kTypeIdSampleRecord);
-  SampleRecord* record =
-      allocator->GetAsObject<SampleRecord>(ref, kTypeIdSampleRecord);
-
+  SampleRecord* record = allocator->New<SampleRecord>();
   if (!record) {
     NOTREACHED() << "full=" << allocator->IsFull()
                  << ", corrupt=" << allocator->IsCorrupt();
@@ -172,6 +207,8 @@ PersistentSampleMap::CreatePersistentRecord(
   record->id = sample_map_id;
   record->value = value;
   record->count = 0;
+
+  PersistentMemoryAllocator::Reference ref = allocator->GetAsReference(record);
   allocator->MakeIterable(ref);
   return ref;
 }
@@ -179,13 +216,14 @@ PersistentSampleMap::CreatePersistentRecord(
 bool PersistentSampleMap::AddSubtractImpl(SampleCountIterator* iter,
                                           Operator op) {
   Sample min;
-  Sample max;
+  int64_t max;
   Count count;
   for (; !iter->Done(); iter->Next()) {
     iter->Get(&min, &max, &count);
-    if (min + 1 != max)
+    if (count == 0)
+      continue;
+    if (strict_cast<int64_t>(min) + 1 != max)
       return false;  // SparseHistogram only supports bucket with size 1.
-
     *GetOrCreateSampleCountStorage(min) +=
         (op == HistogramSamples::ADD) ? count : -count;
   }
@@ -253,8 +291,7 @@ Count* PersistentSampleMap::ImportSamples(Sample until_value,
   PersistentMemoryAllocator::Reference ref;
   PersistentSampleMapRecords* records = GetRecords();
   while ((ref = records->GetNext()) != 0) {
-    SampleRecord* record =
-        records->GetAsObject<SampleRecord>(ref, kTypeIdSampleRecord);
+    SampleRecord* record = records->GetAsObject<SampleRecord>(ref);
     if (!record)
       continue;
 

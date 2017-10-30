@@ -18,6 +18,10 @@
 
 #if defined(OS_WIN)
 #include <windows.h>
+#elif defined(OS_MACOSX)
+#include <mach/mach_types.h>
+#elif defined(OS_FUCHSIA)
+#include <zircon/types.h>
 #elif defined(OS_POSIX)
 #include <pthread.h>
 #include <unistd.h>
@@ -28,6 +32,10 @@ namespace base {
 // Used for logging. Always an integer value.
 #if defined(OS_WIN)
 typedef DWORD PlatformThreadId;
+#elif defined(OS_MACOSX)
+typedef mach_port_t PlatformThreadId;
+#elif defined(OS_FUCHSIA)
+typedef zx_handle_t PlatformThreadId;
 #elif defined(OS_POSIX)
 typedef pid_t PlatformThreadId;
 #endif
@@ -58,6 +66,8 @@ class PlatformThreadRef {
   bool operator==(PlatformThreadRef other) const {
     return id_ == other.id_;
   }
+
+  bool operator!=(PlatformThreadRef other) const { return id_ != other.id_; }
 
   bool is_null() const {
     return id_ == 0;
@@ -194,16 +204,36 @@ class BASE_EXPORT PlatformThread {
   // priority of the current thread.
   static bool CanIncreaseCurrentThreadPriority();
 
-  // Toggles the current thread's priority at runtime. A thread may not be able
-  // to raise its priority back up after lowering it if the process does not
-  // have a proper permission, e.g. CAP_SYS_NICE on Linux. A thread may not be
-  // able to lower its priority back down after raising it to REALTIME_AUDIO.
+  // Toggles the current thread's priority at runtime.
+  //
+  // A thread may not be able to raise its priority back up after lowering it if
+  // the process does not have a proper permission, e.g. CAP_SYS_NICE on Linux.
+  // A thread may not be able to lower its priority back down after raising it
+  // to REALTIME_AUDIO.
+  //
+  // This function must not be called from the main thread on Mac. This is to
+  // avoid performance regressions (https://crbug.com/601270).
+  //
   // Since changing other threads' priority is not permitted in favor of
   // security, this interface is restricted to change only the current thread
   // priority (https://crbug.com/399473).
   static void SetCurrentThreadPriority(ThreadPriority priority);
 
   static ThreadPriority GetCurrentThreadPriority();
+
+#if defined(OS_LINUX)
+  // Toggles a specific thread's priority at runtime. This can be used to
+  // change the priority of a thread in a different process and will fail
+  // if the calling process does not have proper permissions. The
+  // SetCurrentThreadPriority() function above is preferred in favor of
+  // security but on platforms where sandboxed processes are not allowed to
+  // change priority this function exists to allow a non-sandboxed process
+  // to change the priority of sandboxed threads for improved performance.
+  // Warning: Don't use this for a main thread because that will change the
+  // whole thread group's (i.e. process) priority.
+  static void SetThreadPriority(PlatformThreadId thread_id,
+                                ThreadPriority priority);
+#endif
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(PlatformThread);

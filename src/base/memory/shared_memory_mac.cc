@@ -4,25 +4,34 @@
 
 #include "base/memory/shared_memory.h"
 
+#include <errno.h>
 #include <mach/mach_vm.h>
+#include <stddef.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
 #include "base/logging.h"
-#include "base/mac/foundation_util.h"
 #include "base/mac/mac_util.h"
 #include "base/mac/scoped_mach_vm.h"
-#if 0
+#include "base/memory/shared_memory_helper.h"
+#include "base/memory/shared_memory_tracker.h"
 #include "base/metrics/field_trial.h"
-#endif
 #include "base/metrics/histogram_macros.h"
-#if 0
+#include "base/posix/eintr_wrapper.h"
+#include "base/posix/safe_strerror.h"
 #include "base/process/process_metrics.h"
-#include "base/profiler/scoped_tracker.h"
-#endif
 #include "base/scoped_generic.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/threading/thread_restrictions.h"
+#include "base/unguessable_token.h"
 #include "build/build_config.h"
+
+#if defined(OS_MACOSX)
+#include "base/mac/foundation_util.h"
+#endif  // OS_MACOSX
 
 namespace base {
 
@@ -40,8 +49,7 @@ bool MakeMachSharedMemoryHandleReadOnly(SharedMemoryHandle* new_handle,
   if (!handle.IsValid())
     return false;
 
-  size_t size;
-  CHECK(handle.GetSize(&size));
+  size_t size = handle.GetSize();
 
   // Map if necessary.
   void* temp_addr = mapped_addr;
@@ -67,26 +75,18 @@ bool MakeMachSharedMemoryHandleReadOnly(SharedMemoryHandle* new_handle,
   if (kr != KERN_SUCCESS)
     return false;
 
-  *new_handle = SharedMemoryHandle(named_right, size, base::GetCurrentProcId());
+  *new_handle = SharedMemoryHandle(named_right, size, handle.GetGUID());
   return true;
 }
 
 }  // namespace
 
-SharedMemoryCreateOptions::SharedMemoryCreateOptions()
-    : size(0),
-      executable(false),
-      share_read_only(false) {}
-
-SharedMemory::SharedMemory()
-    : mapped_size_(0), memory_(NULL), read_only_(false), requested_size_(0) {}
+SharedMemory::SharedMemory() {}
 
 SharedMemory::SharedMemory(const SharedMemoryHandle& handle, bool read_only)
-    : shm_(handle),
-      mapped_size_(0),
-      memory_(NULL),
-      read_only_(read_only),
-      requested_size_(0) {}
+    : mapped_memory_mechanism_(SharedMemoryHandle::POSIX),
+      shm_(handle),
+      read_only_(read_only) {}
 
 SharedMemory::~SharedMemory() {
   Unmap();
@@ -99,19 +99,13 @@ bool SharedMemory::IsHandleValid(const SharedMemoryHandle& handle) {
 }
 
 // static
-SharedMemoryHandle SharedMemory::NULLHandle() {
-  return SharedMemoryHandle();
-}
-
-// static
 void SharedMemory::CloseHandle(const SharedMemoryHandle& handle) {
   handle.Close();
 }
 
 // static
 size_t SharedMemory::GetHandleLimit() {
-  // This should be effectively unlimited on OS X.
-  return 10000;
+  return GetMaxFds();
 }
 
 // static
@@ -120,36 +114,67 @@ SharedMemoryHandle SharedMemory::DuplicateHandle(
   return handle.Duplicate();
 }
 
-bool SharedMemory::CreateAndMapAnonymous(size_t size) {
-  return CreateAnonymous(size) && Map(size);
+// static
+int SharedMemory::GetFdFromSharedMemoryHandle(
+    const SharedMemoryHandle& handle) {
+  return handle.file_descriptor_.fd;
 }
 
-// static
-bool SharedMemory::GetSizeFromSharedMemoryHandle(
-    const SharedMemoryHandle& handle,
-    size_t* size) {
-  return handle.GetSize(size);
+bool SharedMemory::CreateAndMapAnonymous(size_t size) {
+  return CreateAnonymous(size) && Map(size);
 }
 
 // Chromium mostly only uses the unique/private shmem as specified by
 // "name == L"". The exception is in the StatsTable.
 bool SharedMemory::Create(const SharedMemoryCreateOptions& options) {
-  // TODO(erikchen): Remove ScopedTracker below once http://crbug.com/466437
-  // is fixed.
-#if 0
-  tracked_objects::ScopedTracker tracking_profile1(
-      FROM_HERE_WITH_EXPLICIT_FUNCTION(
-          "466437 SharedMemory::Create::Start"));
-#endif
   DCHECK(!shm_.IsValid());
-  if (options.size == 0) return false;
+  if (options.size == 0)
+    return false;
 
   if (options.size > static_cast<size_t>(std::numeric_limits<int>::max()))
     return false;
 
-  shm_ = SharedMemoryHandle(options.size);
+  if (options.type == SharedMemoryHandle::MACH) {
+    shm_ = SharedMemoryHandle(options.size, UnguessableToken::Create());
+    requested_size_ = options.size;
+    return shm_.IsValid();
+  }
+
+  // This function theoretically can block on the disk. Both profiling of real
+  // users and local instrumentation shows that this is a real problem.
+  // https://code.google.com/p/chromium/issues/detail?id=466437
+  base::ThreadRestrictions::ScopedAllowIO allow_io;
+
+  ScopedFILE fp;
+  ScopedFD readonly_fd;
+
+  FilePath path;
+  bool result = CreateAnonymousSharedMemory(options, &fp, &readonly_fd, &path);
+  if (!result)
+    return false;
+  DCHECK(fp);  // Should be guaranteed by CreateAnonymousSharedMemory().
+
+  // Get current size.
+  struct stat stat;
+  if (fstat(fileno(fp.get()), &stat) != 0)
+    return false;
+  const size_t current_size = stat.st_size;
+  if (current_size != options.size) {
+    if (HANDLE_EINTR(ftruncate(fileno(fp.get()), options.size)) != 0)
+      return false;
+  }
   requested_size_ = options.size;
-  return shm_.IsValid();
+
+  int mapped_file = -1;
+  int readonly_mapped_file = -1;
+  result = PrepareMapFile(std::move(fp), std::move(readonly_fd), &mapped_file,
+                          &readonly_mapped_file);
+  shm_ = SharedMemoryHandle(FileDescriptor(mapped_file, false), options.size,
+                            UnguessableToken::Create());
+  readonly_shm_ =
+      SharedMemoryHandle(FileDescriptor(readonly_mapped_file, false),
+                         options.size, shm_.GetGUID());
+  return result;
 }
 
 bool SharedMemory::MapAt(off_t offset, size_t bytes) {
@@ -165,6 +190,9 @@ bool SharedMemory::MapAt(off_t offset, size_t bytes) {
     mapped_size_ = bytes;
     DCHECK_EQ(0U, reinterpret_cast<uintptr_t>(memory_) &
                       (SharedMemory::MAP_MINIMUM_ALIGNMENT - 1));
+    mapped_memory_mechanism_ = shm_.type_;
+    mapped_id_ = shm_.GetGUID();
+    SharedMemoryTracker::GetInstance()->IncrementMemoryUsage(*this);
   } else {
     memory_ = NULL;
   }
@@ -176,11 +204,20 @@ bool SharedMemory::Unmap() {
   if (memory_ == NULL)
     return false;
 
-  mach_vm_deallocate(mach_task_self(),
-                     reinterpret_cast<mach_vm_address_t>(memory_),
-                     mapped_size_);
+  SharedMemoryTracker::GetInstance()->DecrementMemoryUsage(*this);
+  switch (mapped_memory_mechanism_) {
+    case SharedMemoryHandle::POSIX:
+      munmap(memory_, mapped_size_);
+      break;
+    case SharedMemoryHandle::MACH:
+      mach_vm_deallocate(mach_task_self(),
+                         reinterpret_cast<mach_vm_address_t>(memory_),
+                         mapped_size_);
+      break;
+  }
   memory_ = NULL;
   mapped_size_ = 0;
+  mapped_id_ = UnguessableToken();
   return true;
 }
 
@@ -188,37 +225,37 @@ SharedMemoryHandle SharedMemory::handle() const {
   return shm_;
 }
 
+SharedMemoryHandle SharedMemory::TakeHandle() {
+  SharedMemoryHandle dup = DuplicateHandle(handle());
+  Close();
+  return dup;
+}
+
 void SharedMemory::Close() {
   shm_.Close();
   shm_ = SharedMemoryHandle();
+  if (shm_.type_ == SharedMemoryHandle::POSIX) {
+    if (readonly_shm_.IsValid()) {
+      readonly_shm_.Close();
+      readonly_shm_ = SharedMemoryHandle();
+    }
+  }
 }
 
-bool SharedMemory::ShareToProcessCommon(ProcessHandle process,
-                                        SharedMemoryHandle* new_handle,
-                                        bool close_self,
-                                        ShareMode share_mode) {
+SharedMemoryHandle SharedMemory::GetReadOnlyHandle() {
+  if (shm_.type_ == SharedMemoryHandle::POSIX) {
+    // We could imagine re-opening the file from /dev/fd, but that can't make it
+    // readonly on Mac: https://codereview.chromium.org/27265002/#msg10.
+    CHECK(readonly_shm_.IsValid());
+    return readonly_shm_.Duplicate();
+  }
+
   DCHECK(shm_.IsValid());
-
-  bool success = false;
-  switch (share_mode) {
-    case SHARE_CURRENT_MODE:
-      *new_handle = shm_.Duplicate();
-      success = true;
-      break;
-    case SHARE_READONLY:
-      success = MakeMachSharedMemoryHandleReadOnly(new_handle, shm_, memory_);
-      break;
-  }
-
+  base::SharedMemoryHandle new_handle;
+  bool success = MakeMachSharedMemoryHandleReadOnly(&new_handle, shm_, memory_);
   if (success)
-    new_handle->SetOwnershipPassesToIPC(true);
-
-  if (close_self) {
-    Unmap();
-    Close();
-  }
-
-  return success;
+    new_handle.SetOwnershipPassesToIPC(true);
+  return new_handle;
 }
 
 }  // namespace base

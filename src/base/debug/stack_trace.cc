@@ -9,9 +9,10 @@
 #include <algorithm>
 #include <sstream>
 
+#include "base/logging.h"
 #include "base/macros.h"
 
-#if HAVE_TRACE_STACK_FRAME_POINTERS
+#if BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
 
 #if defined(OS_LINUX) || defined(OS_ANDROID)
 #include <pthread.h>
@@ -19,18 +20,22 @@
 #include "base/threading/platform_thread.h"
 #endif
 
+#if defined(OS_MACOSX)
+#include <pthread.h>
+#endif
+
 #if defined(OS_LINUX) && defined(__GLIBC__)
 extern "C" void* __libc_stack_end;
 #endif
 
-#endif  // HAVE_TRACE_STACK_FRAME_POINTERS
+#endif  // BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
 
 namespace base {
 namespace debug {
 
 namespace {
 
-#if HAVE_TRACE_STACK_FRAME_POINTERS
+#if BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
 
 #if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
 // GCC and LLVM generate slightly different frames on ARM, see
@@ -40,56 +45,6 @@ constexpr size_t kStackFrameAdjustment = sizeof(uintptr_t);
 #else
 constexpr size_t kStackFrameAdjustment = 0;
 #endif
-
-// Returns end of the stack, or 0 if we couldn't get it.
-uintptr_t GetStackEnd() {
-#if defined(OS_ANDROID)
-  // Bionic reads proc/maps on every call to pthread_getattr_np() when called
-  // from the main thread. So we need to cache end of stack in that case to get
-  // acceptable performance.
-  // For all other threads pthread_getattr_np() is fast enough as it just reads
-  // values from its pthread_t argument.
-  static uintptr_t main_stack_end = 0;
-
-  bool is_main_thread = GetCurrentProcId() == PlatformThread::CurrentId();
-  if (is_main_thread && main_stack_end) {
-    return main_stack_end;
-  }
-
-  uintptr_t stack_begin = 0;
-  size_t stack_size = 0;
-  pthread_attr_t attributes;
-  int error = pthread_getattr_np(pthread_self(), &attributes);
-  if (!error) {
-    error = pthread_attr_getstack(
-        &attributes,
-        reinterpret_cast<void**>(&stack_begin),
-        &stack_size);
-    pthread_attr_destroy(&attributes);
-  }
-  DCHECK(!error);
-
-  uintptr_t stack_end = stack_begin + stack_size;
-  if (is_main_thread) {
-    main_stack_end = stack_end;
-  }
-  return stack_end;  // 0 in case of error
-
-#elif defined(OS_LINUX) && defined(__GLIBC__)
-
-  if (GetCurrentProcId() == PlatformThread::CurrentId()) {
-    // For the main thread we have a shortcut.
-    return reinterpret_cast<uintptr_t>(__libc_stack_end);
-  }
-
-  // No easy way to get end of the stack for non-main threads,
-  // see crbug.com/617730.
-
-#endif
-
-  // Don't know how to get end of the stack.
-  return 0;
-}
 
 uintptr_t GetNextStackFrame(uintptr_t fp) {
   return reinterpret_cast<const uintptr_t*>(fp)[0] - kStackFrameAdjustment;
@@ -176,11 +131,72 @@ uintptr_t ScanStackForNextFrame(uintptr_t fp, uintptr_t stack_end) {
   return 0;
 }
 
-#endif  // HAVE_TRACE_STACK_FRAME_POINTERS
+// Links stack frame |fp| to |parent_fp|, so that during stack unwinding
+// TraceStackFramePointers() visits |parent_fp| after visiting |fp|.
+// Both frame pointers must come from __builtin_frame_address().
+// Returns previous stack frame |fp| was linked to.
+void* LinkStackFrames(void* fpp, void* parent_fp) {
+  uintptr_t fp = reinterpret_cast<uintptr_t>(fpp) - kStackFrameAdjustment;
+  void* prev_parent_fp = reinterpret_cast<void**>(fp)[0];
+  reinterpret_cast<void**>(fp)[0] = parent_fp;
+  return prev_parent_fp;
+}
+
+#endif  // BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
 
 }  // namespace
 
-StackTrace::StackTrace() { }
+#if BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
+uintptr_t GetStackEnd() {
+#if defined(OS_ANDROID)
+  // Bionic reads proc/maps on every call to pthread_getattr_np() when called
+  // from the main thread. So we need to cache end of stack in that case to get
+  // acceptable performance.
+  // For all other threads pthread_getattr_np() is fast enough as it just reads
+  // values from its pthread_t argument.
+  static uintptr_t main_stack_end = 0;
+
+  bool is_main_thread = GetCurrentProcId() == PlatformThread::CurrentId();
+  if (is_main_thread && main_stack_end) {
+    return main_stack_end;
+  }
+
+  uintptr_t stack_begin = 0;
+  size_t stack_size = 0;
+  pthread_attr_t attributes;
+  int error = pthread_getattr_np(pthread_self(), &attributes);
+  if (!error) {
+    error = pthread_attr_getstack(
+        &attributes, reinterpret_cast<void**>(&stack_begin), &stack_size);
+    pthread_attr_destroy(&attributes);
+  }
+  DCHECK(!error);
+
+  uintptr_t stack_end = stack_begin + stack_size;
+  if (is_main_thread) {
+    main_stack_end = stack_end;
+  }
+  return stack_end;  // 0 in case of error
+
+#elif defined(OS_LINUX) && defined(__GLIBC__)
+
+  if (GetCurrentProcId() == PlatformThread::CurrentId()) {
+    // For the main thread we have a shortcut.
+    return reinterpret_cast<uintptr_t>(__libc_stack_end);
+  }
+
+// No easy way to get end of the stack for non-main threads,
+// see crbug.com/617730.
+#elif defined(OS_MACOSX)
+  return reinterpret_cast<uintptr_t>(pthread_get_stackaddr_np(pthread_self()));
+#endif
+
+  // Don't know how to get end of the stack.
+  return 0;
+}
+#endif  // BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
+
+StackTrace::StackTrace() : StackTrace(arraysize(trace_)) {}
 
 StackTrace::StackTrace(const void* const* trace, size_t count) {
   count = std::min(count, arraysize(trace_));
@@ -188,11 +204,6 @@ StackTrace::StackTrace(const void* const* trace, size_t count) {
     memcpy(trace_, trace, count * sizeof(trace_[0]));
   count_ = count;
 }
-
-StackTrace::~StackTrace() {
-}
-
-void StackTrace::OutputToStream(std::ostream* os) const { }
 
 const void *const *StackTrace::Addresses(size_t* count) const {
   *count = count_;
@@ -203,15 +214,13 @@ const void *const *StackTrace::Addresses(size_t* count) const {
 
 std::string StackTrace::ToString() const {
   std::stringstream stream;
-#if 0
-#if !defined(__UCLIBC__)
+#if !defined(__UCLIBC__) && !defined(_AIX)
   OutputToStream(&stream);
-#endif
 #endif
   return stream.str();
 }
 
-#if HAVE_TRACE_STACK_FRAME_POINTERS
+#if BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
 
 size_t TraceStackFramePointers(const void** out_trace,
                                size_t max_depth,
@@ -251,7 +260,18 @@ size_t TraceStackFramePointers(const void** out_trace,
   return depth;
 }
 
-#endif  // HAVE_TRACE_STACK_FRAME_POINTERS
+ScopedStackFrameLinker::ScopedStackFrameLinker(void* fp, void* parent_fp)
+    : fp_(fp),
+      parent_fp_(parent_fp),
+      original_parent_fp_(LinkStackFrames(fp, parent_fp)) {}
+
+ScopedStackFrameLinker::~ScopedStackFrameLinker() {
+  void* previous_parent_fp = LinkStackFrames(fp_, original_parent_fp_);
+  CHECK_EQ(parent_fp_, previous_parent_fp)
+      << "Stack frame's parent pointer has changed!";
+}
+
+#endif  // BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
 
 }  // namespace debug
 }  // namespace base

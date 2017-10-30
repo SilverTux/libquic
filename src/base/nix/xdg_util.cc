@@ -11,6 +11,7 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/path_service.h"
+#include "base/strings/string_util.h"
 #include "base/third_party/xdg_user_dirs/xdg_user_dir_lookup.h"
 
 namespace {
@@ -57,7 +58,8 @@ DesktopEnvironment GetDesktopEnvironment(Environment* env) {
   std::string xdg_current_desktop;
   if (env->GetVar("XDG_CURRENT_DESKTOP", &xdg_current_desktop)) {
     // Not all desktop environments set this env var as of this writing.
-    if (xdg_current_desktop == "Unity") {
+    if (base::StartsWith(xdg_current_desktop, "Unity",
+                         base::CompareCase::SENSITIVE)) {
       // gnome-fallback sessions set XDG_CURRENT_DESKTOP to Unity
       // DESKTOP_SESSION can be gnome-fallback or gnome-fallback-compiz
       std::string desktop_session;
@@ -66,9 +68,10 @@ DesktopEnvironment GetDesktopEnvironment(Environment* env) {
         return DESKTOP_ENVIRONMENT_GNOME;
       }
       return DESKTOP_ENVIRONMENT_UNITY;
-    } else if (xdg_current_desktop == "GNOME") {
+    }
+    if (xdg_current_desktop == "GNOME")
       return DESKTOP_ENVIRONMENT_GNOME;
-    } else if (xdg_current_desktop == "KDE") {
+    if (xdg_current_desktop == "KDE") {
       std::string kde_session;
       if (env->GetVar(kKDESessionEnvVar, &kde_session)) {
         if (kde_session == "5") {
@@ -77,31 +80,34 @@ DesktopEnvironment GetDesktopEnvironment(Environment* env) {
       }
       return DESKTOP_ENVIRONMENT_KDE4;
     }
+    if (xdg_current_desktop == "Pantheon")
+      return DESKTOP_ENVIRONMENT_PANTHEON;
   }
 
   // DESKTOP_SESSION was what everyone used in 2010.
   std::string desktop_session;
   if (env->GetVar("DESKTOP_SESSION", &desktop_session)) {
-    if (desktop_session == "gnome" || desktop_session =="mate") {
+    if (desktop_session == "gnome" || desktop_session == "mate")
       return DESKTOP_ENVIRONMENT_GNOME;
-    } else if (desktop_session == "kde4" || desktop_session == "kde-plasma") {
+    if (desktop_session == "kde4" || desktop_session == "kde-plasma")
       return DESKTOP_ENVIRONMENT_KDE4;
-    } else if (desktop_session == "kde") {
+    if (desktop_session == "kde") {
       // This may mean KDE4 on newer systems, so we have to check.
       if (env->HasVar(kKDESessionEnvVar))
         return DESKTOP_ENVIRONMENT_KDE4;
       return DESKTOP_ENVIRONMENT_KDE3;
-    } else if (desktop_session.find("xfce") != std::string::npos ||
-               desktop_session == "xubuntu") {
+    }
+    if (desktop_session.find("xfce") != std::string::npos ||
+        desktop_session == "xubuntu") {
       return DESKTOP_ENVIRONMENT_XFCE;
     }
   }
 
   // Fall back on some older environment variables.
   // Useful particularly in the DESKTOP_SESSION=default case.
-  if (env->HasVar("GNOME_DESKTOP_SESSION_ID")) {
+  if (env->HasVar("GNOME_DESKTOP_SESSION_ID"))
     return DESKTOP_ENVIRONMENT_GNOME;
-  } else if (env->HasVar("KDE_FULL_SESSION")) {
+  if (env->HasVar("KDE_FULL_SESSION")) {
     if (env->HasVar(kKDESessionEnvVar))
       return DESKTOP_ENVIRONMENT_KDE4;
     return DESKTOP_ENVIRONMENT_KDE3;
@@ -122,6 +128,8 @@ const char* GetDesktopEnvironmentName(DesktopEnvironment env) {
       return "KDE4";
     case DESKTOP_ENVIRONMENT_KDE5:
       return "KDE5";
+    case DESKTOP_ENVIRONMENT_PANTHEON:
+      return "PANTHEON";
     case DESKTOP_ENVIRONMENT_UNITY:
       return "UNITY";
     case DESKTOP_ENVIRONMENT_XFCE:

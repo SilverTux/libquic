@@ -80,7 +80,7 @@ EVP_PKEY *EVP_PKEY_new(void) {
     return NULL;
   }
 
-  memset(ret, 0, sizeof(EVP_PKEY));
+  OPENSSL_memset(ret, 0, sizeof(EVP_PKEY));
   ret->type = EVP_PKEY_NONE;
   ret->references = 1;
 
@@ -108,9 +108,9 @@ void EVP_PKEY_free(EVP_PKEY *pkey) {
   OPENSSL_free(pkey);
 }
 
-EVP_PKEY *EVP_PKEY_up_ref(EVP_PKEY *pkey) {
+int EVP_PKEY_up_ref(EVP_PKEY *pkey) {
   CRYPTO_refcount_inc(&pkey->references);
-  return pkey;
+  return 1;
 }
 
 int EVP_PKEY_is_opaque(const EVP_PKEY *pkey) {
@@ -120,13 +120,6 @@ int EVP_PKEY_is_opaque(const EVP_PKEY *pkey) {
   return 0;
 }
 
-int EVP_PKEY_supports_digest(const EVP_PKEY *pkey, const EVP_MD *md) {
-  if (pkey->ameth && pkey->ameth->pkey_supports_digest) {
-    return pkey->ameth->pkey_supports_digest(pkey, md);
-  }
-  return 1;
-}
-
 int EVP_PKEY_cmp(const EVP_PKEY *a, const EVP_PKEY *b) {
   if (a->type != b->type) {
     return -1;
@@ -134,7 +127,7 @@ int EVP_PKEY_cmp(const EVP_PKEY *a, const EVP_PKEY *b) {
 
   if (a->ameth) {
     int ret;
-    /* Compare parameters if the algorithm has them */
+    // Compare parameters if the algorithm has them
     if (a->ameth->param_cmp) {
       ret = a->ameth->param_cmp(a, b);
       if (ret <= 0) {
@@ -194,9 +187,9 @@ int EVP_PKEY_id(const EVP_PKEY *pkey) {
   return pkey->type;
 }
 
-/* evp_pkey_asn1_find returns the ASN.1 method table for the given |nid|, which
- * should be one of the |EVP_PKEY_*| values. It returns NULL if |nid| is
- * unknown. */
+// evp_pkey_asn1_find returns the ASN.1 method table for the given |nid|, which
+// should be one of the |EVP_PKEY_*| values. It returns NULL if |nid| is
+// unknown.
 static const EVP_PKEY_ASN1_METHOD *evp_pkey_asn1_find(int nid) {
   switch (nid) {
     case EVP_PKEY_RSA:
@@ -205,6 +198,8 @@ static const EVP_PKEY_ASN1_METHOD *evp_pkey_asn1_find(int nid) {
       return &ec_asn1_meth;
     case EVP_PKEY_DSA:
       return &dsa_asn1_meth;
+    case EVP_PKEY_ED25519:
+      return &ed25519_asn1_meth;
     default:
       return NULL;
   }
@@ -302,6 +297,8 @@ EC_KEY *EVP_PKEY_get1_EC_KEY(EVP_PKEY *pkey) {
   return ec_key;
 }
 
+DH *EVP_PKEY_get0_DH(EVP_PKEY *pkey) { return NULL; }
+
 int EVP_PKEY_assign(EVP_PKEY *pkey, int type, void *key) {
   if (!EVP_PKEY_set_type(pkey, type)) {
     return 0;
@@ -355,6 +352,8 @@ int EVP_PKEY_CTX_get_signature_md(EVP_PKEY_CTX *ctx, const EVP_MD **out_md) {
 }
 
 void OpenSSL_add_all_algorithms(void) {}
+
+void OPENSSL_add_all_algorithms_conf(void) {}
 
 void OpenSSL_add_all_ciphers(void) {}
 

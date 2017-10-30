@@ -2,26 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-#ifndef NET_QUIC_QUIC_WRITE_BLOCKED_LIST_H_
-#define NET_QUIC_QUIC_WRITE_BLOCKED_LIST_H_
+#ifndef NET_QUIC_CORE_QUIC_WRITE_BLOCKED_LIST_H_
+#define NET_QUIC_CORE_QUIC_WRITE_BLOCKED_LIST_H_
 
-#include <stddef.h>
-#include <stdint.h>
-
-#include <set>
+#include <cstddef>
+#include <cstdint>
 
 #include "base/macros.h"
-#include "net/base/net_export.h"
-#include "net/quic/core/quic_flags.h"
-#include "net/quic/core/quic_protocol.h"
-#include "net/spdy/priority_write_scheduler.h"
+#include "net/quic/core/quic_packets.h"
+#include "net/quic/platform/api/quic_export.h"
+#include "net/spdy/core/priority_write_scheduler.h"
 
 namespace net {
 
 // Keeps tracks of the QUIC streams that have data to write, sorted by
 // priority.  QUIC stream priority order is:
 // Crypto stream > Headers stream > Data streams by requested priority.
-class NET_EXPORT_PRIVATE QuicWriteBlockedList {
+class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
  private:
   typedef PriorityWriteScheduler<QuicStreamId> QuicPriorityWriteScheduler;
 
@@ -123,9 +120,9 @@ class NET_EXPORT_PRIVATE QuicWriteBlockedList {
     }
   }
 
-  // Pushes a stream to the back of the list for its priority level *unless*
-  // it is latched for doing batched writes in which case it goes to the front
-  // of the list for its priority level.
+  // Pushes a stream to the back of the list for its priority level *unless* it
+  // is latched for doing batched writes in which case it goes to the front of
+  // the list for its priority level.
   // Headers and crypto streams are special cased to always resume first.
   void AddStream(QuicStreamId stream_id) {
     if (stream_id == kCryptoStreamId) {
@@ -143,8 +140,6 @@ class NET_EXPORT_PRIVATE QuicWriteBlockedList {
         stream_id == batch_write_stream_id_[last_priority_popped_] &&
         bytes_left_for_batch_write_[last_priority_popped_] > 0;
     priority_write_scheduler_.MarkStreamReady(stream_id, push_front);
-
-    return;
   }
 
   bool crypto_stream_blocked() const { return crypto_stream_blocked_; }
@@ -173,4 +168,4 @@ class NET_EXPORT_PRIVATE QuicWriteBlockedList {
 
 }  // namespace net
 
-#endif  // NET_QUIC_QUIC_WRITE_BLOCKED_LIST_H_
+#endif  // NET_QUIC_CORE_QUIC_WRITE_BLOCKED_LIST_H_

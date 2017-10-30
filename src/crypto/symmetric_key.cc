@@ -4,8 +4,6 @@
 
 #include "crypto/symmetric_key.h"
 
-#include <openssl/evp.h>
-#include <openssl/rand.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -15,6 +13,8 @@
 #include "base/logging.h"
 #include "base/strings/string_util.h"
 #include "crypto/openssl_util.h"
+#include "third_party/boringssl/src/include/openssl/evp.h"
+#include "third_party/boringssl/src/include/openssl/rand.h"
 
 namespace crypto {
 
@@ -98,11 +98,6 @@ std::unique_ptr<SymmetricKey> SymmetricKey::Import(Algorithm algorithm,
   std::unique_ptr<SymmetricKey> key(new SymmetricKey);
   key->key_ = raw_key;
   return key;
-}
-
-bool SymmetricKey::GetRawKey(std::string* raw_key) {
-  *raw_key = key_;
-  return true;
 }
 
 SymmetricKey::SymmetricKey() = default;

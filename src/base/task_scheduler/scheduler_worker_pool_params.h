@@ -5,55 +5,37 @@
 #ifndef BASE_TASK_SCHEDULER_SCHEDULER_WORKER_POOL_PARAMS_H_
 #define BASE_TASK_SCHEDULER_SCHEDULER_WORKER_POOL_PARAMS_H_
 
-#include <string>
-
-#include "base/macros.h"
-#include "base/threading/platform_thread.h"
+#include "base/task_scheduler/scheduler_worker_params.h"
+#include "base/time/time.h"
 
 namespace base {
 
-class TimeDelta;
-
 class BASE_EXPORT SchedulerWorkerPoolParams final {
  public:
-  enum class IORestriction {
-    ALLOWED,
-    DISALLOWED,
-  };
+  // Constructs a set of params used to initialize a pool. The pool will contain
+  // up to |max_threads|. |suggested_reclaim_time| sets a suggestion on when to
+  // reclaim idle threads. The pool is free to ignore this value for performance
+  // or correctness reasons. |backward_compatibility| indicates whether backward
+  // compatibility is enabled.
+  SchedulerWorkerPoolParams(
+      int max_threads,
+      TimeDelta suggested_reclaim_time,
+      SchedulerBackwardCompatibility backward_compatibility =
+          SchedulerBackwardCompatibility::DISABLED);
 
-  // Construct a scheduler worker pool parameter object. |name| will be used to
-  // label the pool's threads ("TaskScheduler" + |name| + index) and histograms
-  // ("TaskScheduler." + histogram name + "." + |name| + extra suffixes). The
-  // pool will contain up to |max_threads|. |priority_hint| is the preferred
-  // thread priority; the actual thread priority depends on shutdown state and
-  // platform capabilities. |io_restriction| indicates whether Tasks on the pool
-  // are allowed to make I/O calls. |suggested_reclaim_time| sets a suggestion
-  // on when to reclaim idle threads. The pool is free to ignore this value for
-  // performance or correctness reasons.
-  SchedulerWorkerPoolParams(const std::string& name,
-                            ThreadPriority priority_hint,
-                            IORestriction io_restriction,
-                            int max_threads,
-                            const TimeDelta& suggested_reclaim_time);
-  SchedulerWorkerPoolParams(SchedulerWorkerPoolParams&& other);
-  SchedulerWorkerPoolParams& operator=(SchedulerWorkerPoolParams&& other);
+  SchedulerWorkerPoolParams(const SchedulerWorkerPoolParams& other);
+  SchedulerWorkerPoolParams& operator=(const SchedulerWorkerPoolParams& other);
 
-  const std::string& name() const { return name_; }
-  ThreadPriority priority_hint() const { return priority_hint_; }
-  IORestriction io_restriction() const { return io_restriction_; }
-  size_t max_threads() const { return max_threads_; }
-  const TimeDelta& suggested_reclaim_time() const {
-    return suggested_reclaim_time_;
+  int max_threads() const { return max_threads_; }
+  TimeDelta suggested_reclaim_time() const { return suggested_reclaim_time_; }
+  SchedulerBackwardCompatibility backward_compatibility() const {
+    return backward_compatibility_;
   }
 
  private:
-  std::string name_;
-  ThreadPriority priority_hint_;
-  IORestriction io_restriction_;
-  size_t max_threads_;
+  int max_threads_;
   TimeDelta suggested_reclaim_time_;
-
-  DISALLOW_COPY_AND_ASSIGN(SchedulerWorkerPoolParams);
+  SchedulerBackwardCompatibility backward_compatibility_;
 };
 
 }  // namespace base

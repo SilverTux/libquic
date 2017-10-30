@@ -2,6 +2,9 @@ cmake_minimum_required (VERSION 2.8.10)
 
 project (libquic)
 
+add_subdirectory(boringssl)
+add_subdirectory(protobuf/cmake)
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	message(STATUS "Setting build type to 'Debug' as none was specified.")
 	set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
@@ -13,7 +16,7 @@ endif()
 set(COMMON_C_FLAGS "${COMMON_C_FLAGS} -Wall -fpic")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_C_FLAGS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_C_FLAGS} -std=gnu++11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_C_FLAGS} -std=c++1y")
 set(CMAKE_C_FLAGS_RELEASE "-DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-DNDEBUG")
 set(CMAKE_C_FLAGS_DEBUG "-g")
@@ -55,96 +58,118 @@ endif()
 
 #add_subdirectory(crypto)
 
-include_directories(src src/third_party/modp_b64 boringssl/include src/third_party/protobuf/src)
+include_directories(src src/third_party/modp_b64 src/third_party/boringssl/src/include src/third_party/protobuf/src
+                    src/third_party/googletest/src/googlemock/include/
+                    src/third_party/googletest/src/googletest/include/
+                    src/testing/gmock/include
+                    src/testing/gtest/include)
 
 set(
 	NET_SOURCES
 
-	src/net/quic/core/quic_protocol.cc
-	src/net/quic/core/quic_packet_generator.cc
-	src/net/quic/core/quic_flow_controller.cc
-	src/net/quic/core/quic_connection_stats.cc
-	src/net/quic/core/quic_data_writer.cc
-	src/net/quic/core/quic_data_reader.cc
-	src/net/quic/core/quic_session.cc
-	src/net/quic/core/quic_spdy_session.cc
-	src/net/quic/core/quic_spdy_stream.cc
-	src/net/quic/core/iovector.cc
-	src/net/quic/core/quic_stream_sequencer.cc
-	src/net/quic/core/quic_framer.cc
-	src/net/quic/core/quic_sent_packet_manager.cc
-	src/net/quic/core/quic_time.cc
-	src/net/quic/core/quic_headers_stream.cc
-	src/net/quic/core/quic_connection.cc
-	src/net/quic/core/quic_types.cc
-	src/net/quic/core/quic_received_packet_manager.cc
-	src/net/quic/core/quic_write_blocked_list.cc
-	src/net/quic/core/quic_crypto_stream.cc
-	src/net/quic/core/quic_socket_address_coder.cc
-	src/net/quic/core/quic_utils.cc
-	src/net/quic/core/quic_header_list.cc
-	src/net/quic/core/spdy_utils.cc
-	src/net/quic/core/crypto/aead_base_decrypter.cc
-	src/net/quic/core/crypto/aead_base_encrypter.cc
-	src/net/quic/core/crypto/chacha20_poly1305_decrypter.cc
-	src/net/quic/core/crypto/chacha20_poly1305_encrypter.cc
-	src/net/quic/core/crypto/aes_128_gcm_12_decrypter.cc
-	src/net/quic/core/crypto/aes_128_gcm_12_encrypter.cc
-	src/net/quic/core/crypto/p256_key_exchange.cc
-	src/net/quic/core/crypto/quic_compressed_certs_cache.cc
-	src/net/quic/core/crypto/quic_crypto_server_config.cc
-	src/net/quic/core/crypto/crypto_handshake_message.cc
-	src/net/quic/core/crypto/cert_compressor.cc
-	src/net/quic/core/crypto/crypto_secret_boxer.cc
-	src/net/quic/core/crypto/curve25519_key_exchange.cc
-	src/net/quic/core/crypto/quic_decrypter.cc
-	src/net/quic/core/crypto/null_decrypter.cc
-	src/net/quic/core/crypto/crypto_server_config_protobuf.cc
-	src/net/quic/core/crypto/scoped_evp_aead_ctx.cc
-	src/net/quic/core/crypto/quic_random.cc
-	src/net/quic/core/crypto/common_cert_set.cc
-	src/net/quic/core/crypto/null_encrypter.cc
-	src/net/quic/core/crypto/crypto_framer.cc
-	src/net/quic/core/crypto/crypto_handshake.cc
-	src/net/quic/core/crypto/channel_id.cc
-	src/net/quic/core/crypto/strike_register.cc
-	src/net/quic/core/crypto/crypto_utils.cc
-	src/net/quic/core/crypto/local_strike_register_client.cc
-	src/net/quic/core/crypto/quic_encrypter.cc
-	src/net/quic/core/crypto/quic_crypto_client_config.cc
-	src/net/quic/core/crypto/proof_source.cc
-	src/net/quic/core/quic_buffered_packet_store.cc
-	src/net/quic/core/quic_clock.cc
-	src/net/quic/core/quic_alarm.cc
-	src/net/quic/core/quic_sent_entropy_manager.cc
-	src/net/quic/core/quic_multipath_sent_packet_manager.cc
-	src/net/quic/core/congestion_control/pacing_sender.cc
-	src/net/quic/core/congestion_control/general_loss_algorithm.cc
-	src/net/quic/core/congestion_control/send_algorithm_interface.cc
-	src/net/quic/core/congestion_control/cubic.cc
-	src/net/quic/core/congestion_control/cubic_bytes.cc
-	src/net/quic/core/congestion_control/prr_sender.cc
-	src/net/quic/core/congestion_control/hybrid_slow_start.cc
-	src/net/quic/core/congestion_control/rtt_stats.cc
-	src/net/quic/core/congestion_control/tcp_cubic_sender_base.cc
-	src/net/quic/core/congestion_control/tcp_cubic_sender_bytes.cc
-	src/net/quic/core/congestion_control/tcp_cubic_sender_packets.cc
-	src/net/quic/core/quic_config.cc
-	src/net/quic/core/quic_crypto_server_stream.cc
-	src/net/quic/core/quic_flags.cc
-	src/net/quic/core/reliable_quic_stream.cc
-	src/net/quic/core/quic_bandwidth.cc
-	src/net/quic/core/quic_unacked_packet_map.cc
-	src/net/quic/core/quic_packet_creator.cc
-	src/net/quic/core/quic_sustained_bandwidth_recorder.cc
-	src/net/quic/core/quic_client_session_base.cc
-	src/net/quic/core/quic_client_promised_info.cc
-	src/net/quic/core/quic_client_push_promise_index.cc
-	src/net/quic/core/quic_crypto_client_stream.cc
-	src/net/quic/core/quic_server_id.cc
-	src/net/quic/core/quic_simple_buffer_allocator.cc
-	src/net/quic/core/quic_stream_sequencer_buffer.cc
-	src/net/quic/core/quic_server_session_base.cc
+    src/net/quic/core/congestion_control/cubic.cc
+    src/net/quic/core/congestion_control/cubic_bytes.cc
+    src/net/quic/core/congestion_control/pacing_sender.cc
+    src/net/quic/core/congestion_control/prr_sender.cc
+    src/net/quic/core/congestion_control/rtt_stats.cc
+    src/net/quic/core/congestion_control/tcp_cubic_sender_base.cc
+    src/net/quic/core/congestion_control/tcp_cubic_sender_bytes.cc
+    src/net/quic/core/congestion_control/bbr_sender.cc
+    src/net/quic/core/crypto/aead_base_decrypter.cc
+    src/net/quic/core/crypto/aead_base_encrypter.cc
+    src/net/quic/core/crypto/aes_128_gcm_12_decrypter.cc
+    src/net/quic/core/crypto/aes_128_gcm_12_encrypter.cc
+    src/net/quic/core/crypto/aes_128_gcm_decrypter.cc
+    src/net/quic/core/crypto/aes_128_gcm_encrypter.cc
+    src/net/quic/core/crypto/aes_256_gcm_decrypter.cc
+    src/net/quic/core/crypto/aes_256_gcm_encrypter.cc
+    src/net/quic/core/crypto/cert_compressor.cc
+    src/net/quic/core/crypto/common_cert_set.cc
+    src/net/quic/core/crypto/crypto_framer.cc
+    src/net/quic/core/crypto/crypto_secret_boxer.cc
+    src/net/quic/core/crypto/crypto_server_config_protobuf.cc
+    src/net/quic/core/crypto/crypto_utils.cc
+    src/net/quic/core/crypto/null_decrypter.cc
+    src/net/quic/core/crypto/null_encrypter.cc
+    src/net/quic/core/crypto/proof_source.cc
+    src/net/quic/core/crypto/quic_crypto_client_config.cc
+    src/net/quic/core/crypto/quic_crypto_proof.cc
+    src/net/quic/core/crypto/quic_crypto_server_config.cc
+    src/net/quic/core/crypto/quic_decrypter.cc
+    src/net/quic/core/crypto/quic_encrypter.cc
+    src/net/quic/core/crypto/quic_random.cc
+    src/net/quic/core/crypto/quic_tls_adapter.cc
+    src/net/quic/core/crypto/scoped_evp_aead_ctx.cc
+    src/net/quic/core/frames/quic_blocked_frame.cc
+    src/net/quic/core/frames/quic_connection_close_frame.cc
+    src/net/quic/core/frames/quic_frame.cc
+    src/net/quic/core/frames/quic_goaway_frame.cc
+    src/net/quic/core/frames/quic_padding_frame.cc
+    src/net/quic/core/frames/quic_rst_stream_frame.cc
+    src/net/quic/core/frames/quic_stop_waiting_frame.cc
+    src/net/quic/core/frames/quic_window_update_frame.cc
+    src/net/quic/core/frames/quic_ack_frame.cc
+    src/net/quic/core/frames/quic_stream_frame.cc
+    src/net/quic/core/quic_ack_listener_interface.cc
+    src/net/quic/core/quic_alarm.cc
+    src/net/quic/core/quic_buffer_allocator.cc
+    src/net/quic/core/quic_buffered_packet_store.cc
+    src/net/quic/core/quic_client_promised_info.cc
+    src/net/quic/core/quic_config.cc
+    src/net/quic/core/quic_connection.cc
+    src/net/quic/core/quic_connection_stats.cc
+    src/net/quic/core/quic_constants.cc
+    src/net/quic/core/quic_crypto_client_stream.cc
+    src/net/quic/core/quic_crypto_framer_parse_message_fuzzer.cc
+    src/net/quic/core/quic_crypto_server_stream.cc
+    src/net/quic/core/quic_crypto_stream.cc
+    src/net/quic/core/quic_data_reader.cc
+    src/net/quic/core/quic_data_writer.cc
+    src/net/quic/core/quic_error_codes.cc
+    src/net/quic/core/quic_flow_controller.cc
+    src/net/quic/core/quic_framer.cc
+    src/net/quic/core/quic_packet_creator.cc
+    src/net/quic/core/quic_packet_generator.cc
+    src/net/quic/core/quic_packets.cc
+    src/net/quic/core/quic_received_packet_manager.cc
+    src/net/quic/core/quic_sent_packet_manager.cc
+    src/net/quic/core/quic_server_id.cc
+    src/net/quic/core/quic_server_session_base.cc
+    src/net/quic/core/quic_session.cc
+    src/net/quic/core/quic_simple_buffer_allocator.cc
+    src/net/quic/core/quic_socket_address_coder.cc
+    src/net/quic/core/quic_spdy_client_session_base.cc
+    src/net/quic/core/quic_spdy_session.cc
+    src/net/quic/core/quic_spdy_stream.cc
+    src/net/quic/core/quic_stream_send_buffer.cc
+    src/net/quic/core/quic_stream_sequencer.cc
+    src/net/quic/core/quic_stream_sequencer_buffer.cc
+    src/net/quic/core/quic_tag.cc
+    src/net/quic/core/quic_time.cc
+    src/net/quic/core/quic_transmission_info.cc
+    src/net/quic/core/quic_types.cc
+    src/net/quic/core/quic_utils.cc
+    src/net/quic/core/quic_write_blocked_list.cc
+    src/net/quic/core/spdy_utils.cc
+    src/net/quic/core/quic_stream.cc
+    src/net/quic/core/quic_unacked_packet_map.cc
+    src/net/quic/core/quic_version_manager.cc
+    src/net/quic/core/quic_versions.cc
+    src/net/quic/platform/api/quic_clock.cc
+    src/net/quic/platform/api/quic_ip_address.cc
+    src/net/quic/platform/api/quic_mutex.cc
+    src/net/quic/platform/api/quic_socket_address.cc
+    src/net/quic/platform/api/quic_url.cc
+    src/net/quic/platform/api/quic_url_utils.cc
+    src/net/quic/platform/impl/quic_flags_impl.cc
+    src/net/quic/platform/impl/quic_ip_address_impl.cc
+    src/net/quic/platform/impl/quic_mem_slice_impl.cc
+    src/net/quic/platform/impl/quic_mem_slice_span_impl.cc
+    src/net/quic/platform/impl/quic_mutex_impl.cc
+    src/net/quic/platform/impl/quic_socket_address_impl.cc
+    src/net/quic/platform/impl/quic_url_impl.cc
+    src/net/quic/platform/impl/quic_url_utils_impl.cc
+
 
 	src/net/base/int128.cc
 	src/net/base/escape.cc
@@ -158,27 +183,20 @@ set(
 	src/net/base/parse_number.cc
 	src/net/base/arena.cc
 
-	src/net/spdy/spdy_frame_reader.cc
-	src/net/spdy/spdy_frame_builder.cc
-	src/net/spdy/spdy_framer.cc
-	src/net/spdy/spdy_header_block.cc
-	src/net/spdy/spdy_headers_block_parser.cc
-	src/net/spdy/spdy_framer_decoder_adapter.cc
-	src/net/spdy/spdy_protocol.cc
-	src/net/spdy/spdy_flags.cc
-	src/net/spdy/spdy_alt_svc_wire_format.cc
-	src/net/spdy/spdy_pinnable_buffer_piece.cc
-	src/net/spdy/spdy_prefixed_buffer_reader.cc
-	src/net/spdy/hpack/hpack_constants.cc
-	src/net/spdy/hpack/hpack_decoder.cc
-	src/net/spdy/hpack/hpack_encoder.cc
-	src/net/spdy/hpack/hpack_entry.cc
-	src/net/spdy/hpack/hpack_header_table.cc
-	src/net/spdy/hpack/hpack_huffman_table.cc
-	src/net/spdy/hpack/hpack_huffman_decoder.cc
-	src/net/spdy/hpack/hpack_input_stream.cc
-	src/net/spdy/hpack/hpack_output_stream.cc
-	src/net/spdy/hpack/hpack_static_table.cc
+    src/net/spdy/core/array_output_buffer.cc
+    src/net/spdy/core/mock_spdy_framer_visitor.cc
+    src/net/spdy/core/spdy_alt_svc_wire_format.cc
+    src/net/spdy/core/spdy_deframer_visitor.cc
+    src/net/spdy/core/spdy_frame_builder.cc
+    src/net/spdy/core/spdy_frame_reader.cc
+    src/net/spdy/core/spdy_framer.cc
+    src/net/spdy/core/spdy_no_op_visitor.cc
+    src/net/spdy/core/spdy_pinnable_buffer_piece.cc
+    src/net/spdy/core/spdy_prefixed_buffer_reader.cc
+    src/net/spdy/core/spdy_protocol.cc
+    src/net/spdy/platform/impl/spdy_string_utils_impl.cc
+    src/net/spdy/platform/impl/spdy_mem_slice_impl.cc
+
 )
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
@@ -298,8 +316,8 @@ set(
 	src/base/threading/thread_local_storage.cc
 	src/base/threading/thread_collision_warner.cc
 	src/base/threading/thread_checker_impl.cc
-	src/base/threading/thread_local_posix.cc
-	src/base/time/time_posix.cc
+	#src/base/threading/thread_local_posix.cc
+	#src/base/time/time_posix.cc
 	src/base/time/time.cc
 	src/base/synchronization/lock.cc
 	src/base/synchronization/lock_impl_posix.cc
@@ -359,7 +377,7 @@ set(
 	src/base/files/memory_mapped_file.cc
 	src/base/files/memory_mapped_file_posix.cc
 	src/base/third_party/nspr/prtime.cc
-	src/base/third_party/dmg_fp/dtoa.cc
+	#src/base/third_party/dmg_fp/dtoa.cc
 	src/base/third_party/dmg_fp/g_fmt.cc
 	src/base/third_party/icu/icu_utf.cc
 	src/base/timer/elapsed_timer.cc
@@ -373,14 +391,21 @@ set(
 set(
 	CRYPTO_SOURCES
 
-	src/crypto/curve25519.cc
-	src/crypto/hkdf.cc
-	src/crypto/hmac.cc
-	src/crypto/openssl_util.cc
-	src/crypto/symmetric_key.cc
-	src/crypto/random.cc
-	src/crypto/secure_util.cc
-	src/crypto/secure_hash.cc
+    src/crypto/aead.cc
+    src/crypto/ec_private_key.cc
+    src/crypto/ec_signature_creator.cc
+    src/crypto/ec_signature_creator_impl.cc
+    src/crypto/encryptor.cc
+    src/crypto/mac_security_services_lock.cc
+    src/crypto/openssl_util.cc
+    src/crypto/p224.cc
+    src/crypto/p224_spake.cc
+    src/crypto/random.cc
+    src/crypto/rsa_private_key.cc
+    src/crypto/secure_util.cc
+    src/crypto/signature_creator.cc
+    src/crypto/signature_verifier.cc
+    src/crypto/symmetric_key.cc
 )
 
 set(
@@ -479,6 +504,7 @@ add_library(
 	src/third_party/zlib/gzread.c
 	src/third_party/zlib/uncompr.c
 )
+
 target_link_libraries(quic ${BASE_ARCH_LIBRARIES} ssl crypto protobuf)
 
 #add_executable(
@@ -486,9 +512,5 @@ target_link_libraries(quic ${BASE_ARCH_LIBRARIES} ssl crypto protobuf)
 #
 #	custom/main.cc
 #)
-
-# XXX(serialx): Not sure if this is safe, since our CFLAGS contaminate boringssl build
-add_subdirectory(boringssl)
-add_subdirectory(protobuf)
 
 #target_link_libraries(test_quic_server quic ssl crypto -pthread ${BASE_ARCH_LIBRARIES})

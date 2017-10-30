@@ -5,92 +5,119 @@
 #ifndef BASE_TASK_SCHEDULER_TASK_SCHEDULER_IMPL_H_
 #define BASE_TASK_SCHEDULER_TASK_SCHEDULER_IMPL_H_
 
-#include <stddef.h>
-
 #include <memory>
-#include <string>
 #include <vector>
 
 #include "base/base_export.h"
 #include "base/callback.h"
 #include "base/logging.h"
 #include "base/macros.h"
+#include "base/memory/ptr_util.h"
 #include "base/memory/ref_counted.h"
+#include "base/strings/string_piece.h"
 #include "base/synchronization/atomic_flag.h"
-#include "base/task_runner.h"
 #include "base/task_scheduler/delayed_task_manager.h"
+#include "base/task_scheduler/scheduler_single_thread_task_runner_manager.h"
 #include "base/task_scheduler/scheduler_worker_pool_impl.h"
-#include "base/task_scheduler/sequence.h"
+#include "base/task_scheduler/single_thread_task_runner_thread_mode.h"
 #include "base/task_scheduler/task_scheduler.h"
 #include "base/task_scheduler/task_tracker.h"
 #include "base/task_scheduler/task_traits.h"
 #include "base/threading/thread.h"
+#include "build/build_config.h"
+
+#if defined(OS_POSIX) && !defined(OS_NACL_SFI)
+#include "base/task_scheduler/task_tracker_posix.h"
+#endif
+
+#if defined(OS_WIN)
+#include "base/win/com_init_check_hook.h"
+#endif
 
 namespace base {
 
-class SchedulerWorkerPoolParams;
+class HistogramBase;
 
 namespace internal {
-
-class SchedulerServiceThread;
 
 // Default TaskScheduler implementation. This class is thread-safe.
 class BASE_EXPORT TaskSchedulerImpl : public TaskScheduler {
  public:
-  // Creates and returns an initialized TaskSchedulerImpl. CHECKs on failure.
-  // |worker_pool_params_vector| describes the worker pools to create.
-  // |worker_pool_index_for_traits_callback| returns the index in |worker_pools|
-  // of the worker pool in which a task with given traits should run.
-  static std::unique_ptr<TaskSchedulerImpl> Create(
-      const std::vector<SchedulerWorkerPoolParams>& worker_pool_params_vector,
-      const WorkerPoolIndexForTraitsCallback&
-          worker_pool_index_for_traits_callback);
+  using TaskTrackerImpl =
+#if defined(OS_POSIX) && !defined(OS_NACL_SFI)
+      TaskTrackerPosix;
+#else
+      TaskTracker;
+#endif
 
-  // Destroying a TaskSchedulerImpl is not allowed in production; it is always
-  // leaked. In tests, it can only be destroyed after JoinForTesting() has
-  // returned.
+  // |name| is used to label threads and histograms. |task_tracker| can be used
+  // for tests that need more execution control. By default, the production
+  // TaskTracker is used.
+  explicit TaskSchedulerImpl(StringPiece name,
+                             std::unique_ptr<TaskTrackerImpl> task_tracker =
+                                 std::make_unique<TaskTrackerImpl>());
   ~TaskSchedulerImpl() override;
 
   // TaskScheduler:
-  void PostTaskWithTraits(const tracked_objects::Location& from_here,
-                          const TaskTraits& traits,
-                          const Closure& task) override;
+  void Start(const TaskScheduler::InitParams& init_params) override;
+  void PostDelayedTaskWithTraits(const Location& from_here,
+                                 const TaskTraits& traits,
+                                 OnceClosure task,
+                                 TimeDelta delay) override;
   scoped_refptr<TaskRunner> CreateTaskRunnerWithTraits(
+      const TaskTraits& traits) override;
+  scoped_refptr<SequencedTaskRunner> CreateSequencedTaskRunnerWithTraits(
+      const TaskTraits& traits) override;
+  scoped_refptr<SingleThreadTaskRunner> CreateSingleThreadTaskRunnerWithTraits(
       const TaskTraits& traits,
-      ExecutionMode execution_mode) override;
+      SingleThreadTaskRunnerThreadMode thread_mode) override;
+#if defined(OS_WIN)
+  scoped_refptr<SingleThreadTaskRunner> CreateCOMSTATaskRunnerWithTraits(
+      const TaskTraits& traits,
+      SingleThreadTaskRunnerThreadMode thread_mode) override;
+#endif  // defined(OS_WIN)
+  std::vector<const HistogramBase*> GetHistograms() const override;
+  int GetMaxConcurrentNonBlockedTasksWithTraitsDeprecated(
+      const TaskTraits& traits) const override;
   void Shutdown() override;
-
-  // Joins all threads of this scheduler. Tasks that are already running are
-  // allowed to complete their execution. This can only be called once.
-  void JoinForTesting();
+  void FlushForTesting() override;
+  void JoinForTesting() override;
 
  private:
-  explicit TaskSchedulerImpl(const WorkerPoolIndexForTraitsCallback&
-                                 worker_pool_index_for_traits_callback);
-
-  void Initialize(
-      const std::vector<SchedulerWorkerPoolParams>& worker_pool_params_vector);
-
   // Returns the worker pool that runs Tasks with |traits|.
-  SchedulerWorkerPool* GetWorkerPoolForTraits(const TaskTraits& traits);
+  SchedulerWorkerPoolImpl* GetWorkerPoolForTraits(
+      const TaskTraits& traits) const;
 
-  // Callback invoked when a non-single-thread |sequence| isn't empty after a
-  // worker pops a Task from it.
-  void ReEnqueueSequenceCallback(scoped_refptr<Sequence> sequence);
+  // Returns |traits|, with priority set to TaskPriority::USER_BLOCKING if
+  // |all_tasks_user_blocking_| is set.
+  TaskTraits SetUserBlockingPriorityIfNeeded(const TaskTraits& traits) const;
 
-  // Callback invoked when the delayed run time is changed from the
-  // DelayedTaskManager.
-  void OnDelayedRunTimeUpdated();
-
-  TaskTracker task_tracker_;
+  const std::string name_;
+  Thread service_thread_;
+  const std::unique_ptr<TaskTrackerImpl> task_tracker_;
   DelayedTaskManager delayed_task_manager_;
-  const WorkerPoolIndexForTraitsCallback worker_pool_index_for_traits_callback_;
-  std::vector<std::unique_ptr<SchedulerWorkerPoolImpl>> worker_pools_;
-  std::unique_ptr<SchedulerServiceThread> service_thread_;
+  SchedulerSingleThreadTaskRunnerManager single_thread_task_runner_manager_;
+
+  // Indicates that all tasks are handled as if they had been posted with
+  // TaskPriority::USER_BLOCKING. Since this is set in Start(), it doesn't apply
+  // to tasks posted before Start() or to tasks posted to TaskRunners created
+  // before Start().
+  //
+  // TODO(fdoray): Remove after experiment. https://crbug.com/757022
+  AtomicFlag all_tasks_user_blocking_;
+
+  // There are 4 SchedulerWorkerPoolImpl in this array to match the 4
+  // SchedulerWorkerPoolParams in TaskScheduler::InitParams.
+  std::unique_ptr<SchedulerWorkerPoolImpl> worker_pools_[4];
 
 #if DCHECK_IS_ON()
   // Set once JoinForTesting() has returned.
   AtomicFlag join_for_testing_returned_;
+#endif
+
+#if defined(OS_WIN) && defined(COM_INIT_CHECK_HOOK_ENABLED)
+  // Provides COM initialization verification for supported builds.
+  base::win::ComInitCheckHook com_init_check_hook_;
 #endif
 
   DISALLOW_COPY_AND_ASSIGN(TaskSchedulerImpl);

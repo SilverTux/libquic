@@ -13,6 +13,7 @@
 #include "base/base_export.h"
 #include "base/gtest_prod_util.h"
 #include "base/macros.h"
+#include "base/metrics/persistent_memory_allocator.h"
 #include "base/strings/string_piece.h"
 #include "base/synchronization/lock.h"
 
@@ -29,15 +30,25 @@ enum FeatureState {
 // The Feature struct is used to define the default state for a feature. See
 // comment below for more details. There must only ever be one struct instance
 // for a given feature name - generally defined as a constant global variable or
-// file static.
+// file static. It should never be used as a constexpr as it breaks
+// pointer-based identity lookup.
 struct BASE_EXPORT Feature {
   // The name of the feature. This should be unique to each feature and is used
   // for enabling/disabling features via command line flags and experiments.
+  // It is strongly recommended to use CamelCase style for feature names, e.g.
+  // "MyGreatFeature".
   const char* const name;
 
   // The default state (i.e. enabled or disabled) for this feature.
   const FeatureState default_state;
 };
+
+#if DCHECK_IS_ON() && defined(SYZYASAN)
+// SyzyASAN builds have DCHECKs built-in, but configurable at run-time to been
+// fatal, or not, via a DcheckIsFatal feature. We define the Feature here since
+// it is checked in FeatureList::SetInstance(). See crbug.com/596231.
+extern const Feature kSyzyAsanDCheckIsFatalFeature;
+#endif  // defined(SYZYASAN)
 
 // The FeatureList class is used to determine whether a given feature is on or
 // off. It provides an authoritative answer, taking into account command-line
@@ -67,6 +78,10 @@ struct BASE_EXPORT Feature {
 //   --enable-features=Feature5,Feature7
 //   --disable-features=Feature1,Feature2,Feature3
 //
+// To enable/disable features in a test, do NOT append --enable-features or
+// --disable-features to the command-line directly. Instead, use
+// ScopedFeatureList. See base/test/scoped_feature_list.h for details.
+//
 // After initialization (which should be done single-threaded), the FeatureList
 // API is thread safe.
 //
@@ -91,6 +106,11 @@ class BASE_EXPORT FeatureList {
   // FinalizeInitialization() has been called).
   void InitializeFromCommandLine(const std::string& enable_features,
                                  const std::string& disable_features);
+
+  // Initializes feature overrides through the field trial allocator, which
+  // we're using to store the feature names, their override state, and the name
+  // of the associated field trial.
+  void InitializeFromSharedMemory(PersistentMemoryAllocator* allocator);
 
   // Specifies whether a feature override enables or disables the feature.
   enum OverrideState {
@@ -124,6 +144,9 @@ class BASE_EXPORT FeatureList {
                                   OverrideState override_state,
                                   FieldTrial* field_trial);
 
+  // Loops through feature overrides and serializes them all into |allocator|.
+  void AddFeaturesToAllocator(PersistentMemoryAllocator* allocator);
+
   // Returns comma-separated lists of feature names (in the same format that is
   // accepted by InitializeFromCommandLine()) corresponding to features that
   // have been overridden - either through command-line or via FieldTrials. For
@@ -145,9 +168,10 @@ class BASE_EXPORT FeatureList {
   // called after the singleton instance has been registered via SetInstance().
   static FieldTrial* GetFieldTrial(const Feature& feature);
 
-  // Splits a comma-separated string containing feature names into a vector.
-  static std::vector<std::string> SplitFeatureListString(
-      const std::string& input);
+  // Splits a comma-separated string containing feature names into a vector. The
+  // resulting pieces point to parts of |input|.
+  static std::vector<base::StringPiece> SplitFeatureListString(
+      base::StringPiece input);
 
   // Initializes and sets an instance of FeatureList with feature overrides via
   // command-line flags |enable_features| and |disable_features| if one has not
@@ -163,6 +187,8 @@ class BASE_EXPORT FeatureList {
 
   // Registers the given |instance| to be the singleton feature list for this
   // process. This should only be called once and |instance| must not be null.
+  // Note: If you are considering using this for the purposes of testing, take
+  // a look at using base/test/scoped_feature_list.h instead.
   static void SetInstance(std::unique_ptr<FeatureList> instance);
 
   // Clears the previously-registered singleton instance for tests and returns
@@ -178,6 +204,10 @@ class BASE_EXPORT FeatureList {
 
  private:
   FRIEND_TEST_ALL_PREFIXES(FeatureListTest, CheckFeatureIdentity);
+  FRIEND_TEST_ALL_PREFIXES(FeatureListTest,
+                           StoreAndRetrieveFeaturesFromSharedMemory);
+  FRIEND_TEST_ALL_PREFIXES(FeatureListTest,
+                           StoreAndRetrieveAssociatedFeaturesFromSharedMemory);
 
   struct OverrideEntry {
     // The overridden enable (on/off) state of the feature.

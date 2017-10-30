@@ -55,6 +55,9 @@ class BASE_EXPORT PriorityQueue {
     // Returns true if the PriorityQueue is empty.
     bool IsEmpty() const;
 
+    // Returns the number of Sequences in the PriorityQueue.
+    size_t Size() const;
+
    private:
     friend class PriorityQueue;
 
@@ -69,11 +72,6 @@ class BASE_EXPORT PriorityQueue {
   };
 
   PriorityQueue();
-
-  // |predecessor_priority_queue| is a PriorityQueue for which a thread is
-  // allowed to have an active Transaction when it creates a Transaction for
-  // this PriorityQueue.
-  PriorityQueue(const PriorityQueue* predecessor_priority_queue);
 
   ~PriorityQueue();
 

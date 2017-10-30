@@ -2,26 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef NET_QUIC_CRYPTO_CRYPTO_HANDSHAKE_MESSAGE_H_
-#define NET_QUIC_CRYPTO_CRYPTO_HANDSHAKE_MESSAGE_H_
+#ifndef NET_QUIC_CORE_CRYPTO_CRYPTO_HANDSHAKE_MESSAGE_H_
+#define NET_QUIC_CORE_CRYPTO_CRYPTO_HANDSHAKE_MESSAGE_H_
 
-#include <stddef.h>
-#include <stdint.h>
-
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "base/strings/string_piece.h"
-#include "net/base/net_export.h"
-#include "net/quic/core/quic_protocol.h"
+#include "net/base/int128.h"
+#include "net/quic/core/quic_packets.h"
+#include "net/quic/platform/api/quic_export.h"
+#include "net/quic/platform/api/quic_string_piece.h"
 
 namespace net {
 
 // An intermediate format of a handshake message that's convenient for a
 // CryptoFramer to serialize from or parse into.
-class NET_EXPORT_PRIVATE CryptoHandshakeMessage {
+class QUIC_EXPORT_PRIVATE CryptoHandshakeMessage {
  public:
   CryptoHandshakeMessage();
   CryptoHandshakeMessage(const CryptoHandshakeMessage& other);
@@ -36,7 +35,7 @@ class NET_EXPORT_PRIVATE CryptoHandshakeMessage {
 
   // GetSerialized returns the serialized form of this message and caches the
   // result. Subsequently altering the message does not invalidate the cache.
-  const QuicData& GetSerialized() const;
+  const QuicData& GetSerialized(Perspective perspective) const;
 
   // MarkDirty invalidates the cache created by |GetSerialized|.
   void MarkDirty();
@@ -61,6 +60,14 @@ class NET_EXPORT_PRIVATE CryptoHandshakeMessage {
     }
   }
 
+  // Sets an element with the given tag to the on-the-wire representation of
+  // |version|.
+  void SetVersion(QuicTag tag, QuicTransportVersion version);
+
+  // Sets an element with the given tag to the on-the-wire representation of
+  // the elements in |versions|.
+  void SetVersionVector(QuicTag tag, QuicTransportVersionVector versions);
+
   // Returns the message tag.
   QuicTag tag() const { return tag_; }
   // Sets the message tag.
@@ -68,30 +75,39 @@ class NET_EXPORT_PRIVATE CryptoHandshakeMessage {
 
   const QuicTagValueMap& tag_value_map() const { return tag_value_map_; }
 
-  void SetStringPiece(QuicTag tag, base::StringPiece value);
+  void SetStringPiece(QuicTag tag, QuicStringPiece value);
 
   // Erase removes a tag/value, if present, from the message.
   void Erase(QuicTag tag);
 
   // GetTaglist finds an element with the given tag containing zero or more
-  // tags. If such a tag doesn't exist, it returns false. Otherwise it sets
-  // |out_tags| and |out_len| to point to the array of tags and returns true.
-  // The array points into the CryptoHandshakeMessage and is valid only for as
-  // long as the CryptoHandshakeMessage exists and is not modified.
-  QuicErrorCode GetTaglist(QuicTag tag,
-                           const QuicTag** out_tags,
-                           size_t* out_len) const;
+  // tags. If such a tag doesn't exist, it returns an error code. Otherwise it
+  // populates |out_tags| with the tags and returns QUIC_NO_ERROR.
+  QuicErrorCode GetTaglist(QuicTag tag, QuicTagVector* out_tags) const;
 
-  bool GetStringPiece(QuicTag tag, base::StringPiece* out) const;
+  // GetVersionLabelList finds an element with the given tag containing zero or
+  // more version labels. If such a tag doesn't exist, it returns an error code.
+  // Otherwise it populates |out| with the labels and returns QUIC_NO_ERROR.
+  QuicErrorCode GetVersionLabelList(QuicTag tag,
+                                    QuicVersionLabelVector* out) const;
+
+  // GetVersionLabel finds an element with the given tag containing a single
+  // version label. If such a tag doesn't exist, it returns an error code.
+  // Otherwise it populates |out| with the label and returns QUIC_NO_ERROR.
+  QuicErrorCode GetVersionLabel(QuicTag tag, QuicVersionLabel* out) const;
+
+  bool GetStringPiece(QuicTag tag, QuicStringPiece* out) const;
+  bool HasStringPiece(QuicTag tag) const;
 
   // GetNthValue24 interprets the value with the given tag to be a series of
   // 24-bit, length prefixed values and it returns the subvalue with the given
   // index.
   QuicErrorCode GetNthValue24(QuicTag tag,
                               unsigned index,
-                              base::StringPiece* out) const;
+                              QuicStringPiece* out) const;
   QuicErrorCode GetUint32(QuicTag tag, uint32_t* out) const;
   QuicErrorCode GetUint64(QuicTag tag, uint64_t* out) const;
+  QuicErrorCode GetUint128(QuicTag tag, uint128* out) const;
 
   // size returns 4 (message tag) + 2 (uint16_t, number of entries) +
   // (4 (tag) + 4 (end offset))*tag_value_map_.size() + ∑ value sizes.
@@ -110,7 +126,7 @@ class NET_EXPORT_PRIVATE CryptoHandshakeMessage {
 
   // DebugString returns a multi-line, string representation of the message
   // suitable for including in debug output.
-  std::string DebugString() const;
+  std::string DebugString(Perspective perspective) const;
 
  private:
   // GetPOD is a utility function for extracting a plain-old-data value. If
@@ -122,7 +138,7 @@ class NET_EXPORT_PRIVATE CryptoHandshakeMessage {
   // little-endian.
   QuicErrorCode GetPOD(QuicTag tag, void* out, size_t len) const;
 
-  std::string DebugStringInternal(size_t indent) const;
+  std::string DebugStringInternal(size_t indent, Perspective perspective) const;
 
   QuicTag tag_;
   QuicTagValueMap tag_value_map_;
@@ -136,4 +152,4 @@ class NET_EXPORT_PRIVATE CryptoHandshakeMessage {
 
 }  // namespace net
 
-#endif  // NET_QUIC_CRYPTO_CRYPTO_HANDSHAKE_MESSAGE_H_
+#endif  // NET_QUIC_CORE_CRYPTO_CRYPTO_HANDSHAKE_MESSAGE_H_

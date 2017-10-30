@@ -8,36 +8,32 @@
 //
 // This implementation wraps the classes base::TimeTicks and base::TimeDelta.
 
-#ifndef NET_QUIC_QUIC_TIME_H_
-#define NET_QUIC_QUIC_TIME_H_
-
-#include <stdint.h>
+#ifndef NET_QUIC_CORE_QUIC_TIME_H_
+#define NET_QUIC_CORE_QUIC_TIME_H_
 
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <ostream>
 
 #include "base/compiler_specific.h"
 #include "base/time/time.h"
-#include "net/base/net_export.h"
+#include "net/quic/platform/api/quic_export.h"
 
 #define QUICTIME_CONSTEXPR inline
 
 namespace net {
 
-static const int kNumSecondsPerMinute = 60;
-static const int kNumSecondsPerHour = kNumSecondsPerMinute * 60;
-static const uint64_t kNumMicrosPerSecond = base::Time::kMicrosecondsPerSecond;
-static const uint64_t kNumMicrosPerMilli =
-    base::Time::kMicrosecondsPerMillisecond;
+class QuicClock;
 
 // A QuicTime is a purely relative time. QuicTime values from different clocks
 // cannot be compared to each other. If you need an absolute time, see
 // QuicWallTime, below.
-class NET_EXPORT_PRIVATE QuicTime {
+class QUIC_EXPORT_PRIVATE QuicTime {
  public:
   // A QuicTime::Delta represents the signed difference between two points in
   // time, stored in microsecond resolution.
-  class NET_EXPORT_PRIVATE Delta {
+  class QUIC_EXPORT_PRIVATE Delta {
    public:
     explicit Delta(base::TimeDelta delta);
 
@@ -110,8 +106,6 @@ class NET_EXPORT_PRIVATE QuicTime {
     friend class QuicClock;
   };
 
-  explicit QuicTime(base::TimeTicks ticks) : time_(ticks.ToInternalValue()) {}
-
   // Creates a new QuicTime with an internal value of 0.  IsInitialized()
   // will return false for these times.
   static QUICTIME_CONSTEXPR QuicTime Zero() { return QuicTime(0); }
@@ -130,6 +124,8 @@ class NET_EXPORT_PRIVATE QuicTime {
   inline bool IsInitialized() const { return 0 != time_; }
 
  private:
+  friend class QuicClock;
+
   friend inline bool operator==(QuicTime lhs, QuicTime rhs);
   friend inline bool operator<(QuicTime lhs, QuicTime rhs);
   friend inline QuicTime operator+(QuicTime lhs, QuicTime::Delta rhs);
@@ -144,7 +140,7 @@ class NET_EXPORT_PRIVATE QuicTime {
 // A QuicWallTime represents an absolute time that is globally consistent. In
 // practice, clock-skew means that comparing values from different machines
 // requires some flexibility.
-class NET_EXPORT_PRIVATE QuicWallTime {
+class QUIC_EXPORT_PRIVATE QuicWallTime {
  public:
   // FromUNIXSeconds constructs a QuicWallTime from a count of the seconds
   // since the UNIX epoch.
@@ -210,9 +206,6 @@ inline bool operator<=(QuicTime::Delta lhs, QuicTime::Delta rhs) {
 inline bool operator>=(QuicTime::Delta lhs, QuicTime::Delta rhs) {
   return !(lhs < rhs);
 }
-inline QuicTime::Delta operator<<(QuicTime::Delta lhs, size_t rhs) {
-  return QuicTime::Delta(lhs.time_offset_ << rhs);
-}
 inline QuicTime::Delta operator>>(QuicTime::Delta lhs, size_t rhs) {
   return QuicTime::Delta(lhs.time_offset_ >> rhs);
 }
@@ -277,4 +270,4 @@ inline std::ostream& operator<<(std::ostream& output,
 }
 }  // namespace net
 
-#endif  // NET_QUIC_QUIC_TIME_H_
+#endif  // NET_QUIC_CORE_QUIC_TIME_H_

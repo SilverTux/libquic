@@ -19,13 +19,15 @@
 
 #include <openssl/mem.h>
 
+#include "../internal.h"
+
 
 void CBB_zero(CBB *cbb) {
-  memset(cbb, 0, sizeof(CBB));
+  OPENSSL_memset(cbb, 0, sizeof(CBB));
 }
 
 static int cbb_init(CBB *cbb, uint8_t *buf, size_t cap) {
-  /* This assumes that |cbb| has already been zeroed. */
+  // This assumes that |cbb| has already been zeroed.
   struct cbb_buffer_st *base;
 
   base = OPENSSL_malloc(sizeof(struct cbb_buffer_st));
@@ -37,6 +39,7 @@ static int cbb_init(CBB *cbb, uint8_t *buf, size_t cap) {
   base->len = 0;
   base->cap = cap;
   base->can_resize = 1;
+  base->error = 0;
 
   cbb->base = base;
   cbb->is_top_level = 1;
@@ -72,8 +75,8 @@ int CBB_init_fixed(CBB *cbb, uint8_t *buf, size_t len) {
 
 void CBB_cleanup(CBB *cbb) {
   if (cbb->base) {
-    /* Only top-level |CBB|s are cleaned up. Child |CBB|s are non-owning. They
-     * are implicitly discarded when the parent is flushed or cleaned up. */
+    // Only top-level |CBB|s are cleaned up. Child |CBB|s are non-owning. They
+    // are implicitly discarded when the parent is flushed or cleaned up.
     assert(cbb->is_top_level);
 
     if (cbb->base->can_resize) {
@@ -94,8 +97,8 @@ static int cbb_buffer_reserve(struct cbb_buffer_st *base, uint8_t **out,
 
   newlen = base->len + len;
   if (newlen < base->len) {
-    /* Overflow */
-    return 0;
+    // Overflow
+    goto err;
   }
 
   if (newlen > base->cap) {
@@ -103,7 +106,7 @@ static int cbb_buffer_reserve(struct cbb_buffer_st *base, uint8_t **out,
     uint8_t *newbuf;
 
     if (!base->can_resize) {
-      return 0;
+      goto err;
     }
 
     if (newcap < base->cap || newcap < newlen) {
@@ -111,7 +114,7 @@ static int cbb_buffer_reserve(struct cbb_buffer_st *base, uint8_t **out,
     }
     newbuf = OPENSSL_realloc(base->buf, newcap);
     if (newbuf == NULL) {
-      return 0;
+      goto err;
     }
 
     base->buf = newbuf;
@@ -123,6 +126,10 @@ static int cbb_buffer_reserve(struct cbb_buffer_st *base, uint8_t **out,
   }
 
   return 1;
+
+err:
+  base->error = 1;
+  return 0;
 }
 
 static int cbb_buffer_add(struct cbb_buffer_st *base, uint8_t **out,
@@ -130,27 +137,32 @@ static int cbb_buffer_add(struct cbb_buffer_st *base, uint8_t **out,
   if (!cbb_buffer_reserve(base, out, len)) {
     return 0;
   }
-  /* This will not overflow or |cbb_buffer_reserve| would have failed. */
+  // This will not overflow or |cbb_buffer_reserve| would have failed.
   base->len += len;
   return 1;
 }
 
 static int cbb_buffer_add_u(struct cbb_buffer_st *base, uint32_t v,
                             size_t len_len) {
-  uint8_t *buf;
-  size_t i;
-
   if (len_len == 0) {
     return 1;
   }
+
+  uint8_t *buf;
   if (!cbb_buffer_add(base, &buf, len_len)) {
     return 0;
   }
 
-  for (i = len_len - 1; i < len_len; i--) {
+  for (size_t i = len_len - 1; i < len_len; i--) {
     buf[i] = v;
     v >>= 8;
   }
+
+  if (v != 0) {
+    base->error = 1;
+    return 0;
+  }
+
   return 1;
 }
 
@@ -164,7 +176,7 @@ int CBB_finish(CBB *cbb, uint8_t **out_data, size_t *out_len) {
   }
 
   if (cbb->base->can_resize && (out_data == NULL || out_len == NULL)) {
-    /* |out_data| and |out_len| can only be NULL if the CBB is fixed. */
+    // |out_data| and |out_len| can only be NULL if the CBB is fixed.
     return 0;
   }
 
@@ -179,13 +191,16 @@ int CBB_finish(CBB *cbb, uint8_t **out_data, size_t *out_len) {
   return 1;
 }
 
-/* CBB_flush recurses and then writes out any pending length prefix. The
- * current length of the underlying base is taken to be the length of the
- * length-prefixed data. */
+// CBB_flush recurses and then writes out any pending length prefix. The
+// current length of the underlying base is taken to be the length of the
+// length-prefixed data.
 int CBB_flush(CBB *cbb) {
   size_t child_start, i, len;
 
-  if (cbb->base == NULL) {
+  // If |cbb->base| has hit an error, the buffer is in an undefined state, so
+  // fail all following calls. In particular, |cbb->child| may point to invalid
+  // memory.
+  if (cbb->base == NULL || cbb->base->error) {
     return 0;
   }
 
@@ -198,23 +213,23 @@ int CBB_flush(CBB *cbb) {
   if (!CBB_flush(cbb->child) ||
       child_start < cbb->child->offset ||
       cbb->base->len < child_start) {
-    return 0;
+    goto err;
   }
 
   len = cbb->base->len - child_start;
 
   if (cbb->child->pending_is_asn1) {
-    /* For ASN.1 we assume that we'll only need a single byte for the length.
-     * If that turned out to be incorrect, we have to move the contents along
-     * in order to make space. */
-    size_t len_len;
+    // For ASN.1 we assume that we'll only need a single byte for the length.
+    // If that turned out to be incorrect, we have to move the contents along
+    // in order to make space.
+    uint8_t len_len;
     uint8_t initial_length_byte;
 
     assert (cbb->child->pending_len_len == 1);
 
     if (len > 0xfffffffe) {
-      /* Too large. */
-      return 0;
+      // Too large.
+      goto err;
     } else if (len > 0xffffff) {
       len_len = 5;
       initial_length_byte = 0x80 | 4;
@@ -229,18 +244,18 @@ int CBB_flush(CBB *cbb) {
       initial_length_byte = 0x80 | 1;
     } else {
       len_len = 1;
-      initial_length_byte = len;
+      initial_length_byte = (uint8_t)len;
       len = 0;
     }
 
     if (len_len != 1) {
-      /* We need to move the contents along in order to make space. */
+      // We need to move the contents along in order to make space.
       size_t extra_bytes = len_len - 1;
       if (!cbb_buffer_add(cbb->base, NULL, extra_bytes)) {
-        return 0;
+        goto err;
       }
-      memmove(cbb->base->buf + child_start + extra_bytes,
-              cbb->base->buf + child_start, len);
+      OPENSSL_memmove(cbb->base->buf + child_start + extra_bytes,
+                      cbb->base->buf + child_start, len);
     }
     cbb->base->buf[cbb->child->offset++] = initial_length_byte;
     cbb->child->pending_len_len = len_len - 1;
@@ -248,17 +263,21 @@ int CBB_flush(CBB *cbb) {
 
   for (i = cbb->child->pending_len_len - 1; i < cbb->child->pending_len_len;
        i--) {
-    cbb->base->buf[cbb->child->offset + i] = len;
+    cbb->base->buf[cbb->child->offset + i] = (uint8_t)len;
     len >>= 8;
   }
   if (len != 0) {
-    return 0;
+    goto err;
   }
 
   cbb->child->base = NULL;
   cbb->child = NULL;
 
   return 1;
+
+err:
+  cbb->base->error = 1;
+  return 0;
 }
 
 const uint8_t *CBB_data(const CBB *cbb) {
@@ -274,7 +293,7 @@ size_t CBB_len(const CBB *cbb) {
 }
 
 static int cbb_add_length_prefixed(CBB *cbb, CBB *out_contents,
-                                   size_t len_len) {
+                                   uint8_t len_len) {
   uint8_t *prefix_bytes;
 
   if (!CBB_flush(cbb)) {
@@ -286,8 +305,8 @@ static int cbb_add_length_prefixed(CBB *cbb, CBB *out_contents,
     return 0;
   }
 
-  memset(prefix_bytes, 0, len_len);
-  memset(out_contents, 0, sizeof(CBB));
+  OPENSSL_memset(prefix_bytes, 0, len_len);
+  OPENSSL_memset(out_contents, 0, sizeof(CBB));
   out_contents->base = cbb->base;
   cbb->child = out_contents;
   cbb->child->offset = offset;
@@ -309,14 +328,18 @@ int CBB_add_u24_length_prefixed(CBB *cbb, CBB *out_contents) {
   return cbb_add_length_prefixed(cbb, out_contents, 3);
 }
 
-int CBB_add_asn1(CBB *cbb, CBB *out_contents, uint8_t tag) {
-  if ((tag & 0x1f) == 0x1f) {
-    /* Long form identifier octets are not supported. */
+int CBB_add_asn1(CBB *cbb, CBB *out_contents, unsigned tag) {
+  if (tag > 0xff ||
+      (tag & 0x1f) == 0x1f) {
+    // Long form identifier octets are not supported. Further, all current valid
+    // tag serializations are 8 bits.
+    cbb->base->error = 1;
     return 0;
   }
 
   if (!CBB_flush(cbb) ||
-      !CBB_add_u8(cbb, tag)) {
+      // |tag|'s representation matches the DER encoding.
+      !CBB_add_u8(cbb, (uint8_t)tag)) {
     return 0;
   }
 
@@ -325,7 +348,7 @@ int CBB_add_asn1(CBB *cbb, CBB *out_contents, uint8_t tag) {
     return 0;
   }
 
-  memset(out_contents, 0, sizeof(CBB));
+  OPENSSL_memset(out_contents, 0, sizeof(CBB));
   out_contents->base = cbb->base;
   cbb->child = out_contents;
   cbb->child->offset = offset;
@@ -342,7 +365,7 @@ int CBB_add_bytes(CBB *cbb, const uint8_t *data, size_t len) {
       !cbb_buffer_add(cbb->base, &dest, len)) {
     return 0;
   }
-  memcpy(dest, data, len);
+  OPENSSL_memcpy(dest, data, len);
   return 1;
 }
 
@@ -397,6 +420,14 @@ int CBB_add_u24(CBB *cbb, uint32_t value) {
   return cbb_buffer_add_u(cbb->base, value, 3);
 }
 
+int CBB_add_u32(CBB *cbb, uint32_t value) {
+  if (!CBB_flush(cbb)) {
+    return 0;
+  }
+
+  return cbb_buffer_add_u(cbb->base, value, 4);
+}
+
 void CBB_discard_child(CBB *cbb) {
   if (cbb->child == NULL) {
     return;
@@ -410,22 +441,21 @@ void CBB_discard_child(CBB *cbb) {
 
 int CBB_add_asn1_uint64(CBB *cbb, uint64_t value) {
   CBB child;
-  size_t i;
   int started = 0;
 
   if (!CBB_add_asn1(cbb, &child, CBS_ASN1_INTEGER)) {
     return 0;
   }
 
-  for (i = 0; i < 8; i++) {
+  for (size_t i = 0; i < 8; i++) {
     uint8_t byte = (value >> 8*(7-i)) & 0xff;
     if (!started) {
       if (byte == 0) {
-        /* Don't encode leading zeros. */
+        // Don't encode leading zeros.
         continue;
       }
-      /* If the high bit is set, add a padding byte to make it
-       * unsigned. */
+      // If the high bit is set, add a padding byte to make it
+      // unsigned.
       if ((byte & 0x80) && !CBB_add_u8(&child, 0)) {
         return 0;
       }
@@ -436,7 +466,7 @@ int CBB_add_asn1_uint64(CBB *cbb, uint64_t value) {
     }
   }
 
-  /* 0 is encoded as a single 0, not the empty string. */
+  // 0 is encoded as a single 0, not the empty string.
   if (!started && !CBB_add_u8(&child, 0)) {
     return 0;
   }

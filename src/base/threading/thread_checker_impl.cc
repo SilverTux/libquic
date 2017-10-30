@@ -24,7 +24,6 @@ bool ThreadCheckerImpl::CalledOnValidThread() const {
   if (task_token_ == TaskToken::GetForCurrentThread())
     return true;
 
-#if 0
   // If this ThreadCheckerImpl is bound to a valid SequenceToken, it must be
   // equal to the current SequenceToken and there must be a registered
   // ThreadTaskRunnerHandle. Otherwise, the fact that the current task runs on
@@ -34,7 +33,6 @@ bool ThreadCheckerImpl::CalledOnValidThread() const {
        !ThreadTaskRunnerHandle::IsSet())) {
     return false;
   }
-#endif
 
   return thread_id_ == PlatformThread::CurrentRef();
 }

@@ -3,37 +3,33 @@
 // found in the LICENSE file.
 //
 // Accumulates frames for the next packet until more frames no longer fit or
-// it's time to create a packet from them. If multipath enabled, only creates
-// packets on one path at the same time. Currently, next packet number is
-// tracked per-path.
+// it's time to create a packet from them.
 
-#ifndef NET_QUIC_QUIC_PACKET_CREATOR_H_
-#define NET_QUIC_QUIC_PACKET_CREATOR_H_
+#ifndef NET_QUIC_CORE_QUIC_PACKET_CREATOR_H_
+#define NET_QUIC_CORE_QUIC_PACKET_CREATOR_H_
 
-#include <stddef.h>
-
+#include <cstddef>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "base/macros.h"
-#include "base/strings/string_piece.h"
+#include "net/quic/core/quic_connection_close_delegate_interface.h"
 #include "net/quic/core/quic_framer.h"
-#include "net/quic/core/quic_protocol.h"
+#include "net/quic/core/quic_packets.h"
+#include "net/quic/core/quic_pending_retransmission.h"
+#include "net/quic/platform/api/quic_export.h"
 
 namespace net {
 namespace test {
 class QuicPacketCreatorPeer;
 }
 
-class QuicRandom;
-
-class NET_EXPORT_PRIVATE QuicPacketCreator {
+class QUIC_EXPORT_PRIVATE QuicPacketCreator {
  public:
   // A delegate interface for further processing serialized packet.
-  class NET_EXPORT_PRIVATE DelegateInterface
+  class QUIC_EXPORT_PRIVATE DelegateInterface
       : public QuicConnectionCloseDelegateInterface {
    public:
     ~DelegateInterface() override {}
@@ -46,7 +42,7 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
   // Interface which gets callbacks from the QuicPacketCreator at interesting
   // points.  Implementations must not mutate the state of the creator
   // as a result of these callbacks.
-  class NET_EXPORT_PRIVATE DebugDelegate {
+  class QUIC_EXPORT_PRIVATE DebugDelegate {
    public:
     virtual ~DebugDelegate() {}
 
@@ -54,11 +50,8 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
     virtual void OnFrameAddedToPacket(const QuicFrame& frame) {}
   };
 
-  // QuicRandom* required for packet entropy.
   QuicPacketCreator(QuicConnectionId connection_id,
                     QuicFramer* framer,
-                    QuicRandom* random_generator,
-                    QuicBufferAllocator* buffer_allocator,
                     DelegateInterface* delegate);
 
   ~QuicPacketCreator();
@@ -80,21 +73,19 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
 
   // The overhead the framing will add for a packet with one frame.
   static size_t StreamFramePacketOverhead(
-      QuicVersion version,
+      QuicTransportVersion version,
       QuicConnectionIdLength connection_id_length,
       bool include_version,
-      bool include_path_id,
       bool include_diversification_nonce,
       QuicPacketNumberLength packet_number_length,
       QuicStreamOffset offset);
 
   // Returns false and flushes all pending frames if current open packet is
   // full.
-  // If current packet is not full, converts a raw payload into a stream frame
-  // that fits into the open packet and adds it to the packet.
-  // The payload begins at |iov_offset| into the |iov|.
+  // If current packet is not full, creates a stream frame that fits into the
+  // open packet and adds it to the packet.
   bool ConsumeData(QuicStreamId id,
-                   QuicIOVector iov,
+                   size_t write_length,
                    size_t iov_offset,
                    QuicStreamOffset offset,
                    bool fin,
@@ -107,7 +98,7 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
 
   // Re-serializes frames with the original packet's packet number length.
   // Used for retransmitting packets to ensure they aren't too long.
-  void ReserializeAllFrames(const PendingRetransmission& retransmission,
+  void ReserializeAllFrames(const QuicPendingRetransmission& retransmission,
                             char* buffer,
                             size_t buffer_len);
 
@@ -120,11 +111,10 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
   // |num_bytes_consumed| to the number of bytes consumed to create the
   // QuicStreamFrame.
   void CreateAndSerializeStreamFrame(QuicStreamId id,
-                                     const QuicIOVector& iov,
+                                     size_t write_length,
                                      QuicStreamOffset iov_offset,
                                      QuicStreamOffset stream_offset,
                                      bool fin,
-                                     QuicAckListenerInterface* listener,
                                      size_t* num_bytes_consumed);
 
   // Returns true if there are frames pending to be serialized.
@@ -159,17 +149,9 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
   // Identical to AddSavedFrame, but allows the frame to be padded.
   bool AddPaddedSavedFrame(const QuicFrame& frame);
 
-  // Adds |listener| to the next serialized packet and notifies the
-  // std::listener with |length| as the number of acked bytes.
-  void AddAckListener(QuicAckListenerInterface* listener,
-                      QuicPacketLength length);
-
   // Creates a version negotiation packet which supports |supported_versions|.
-  // Caller owns the created  packet. Also, sets the entropy hash of the
-  // serialized packet to a random bool and returns that value as a member of
-  // SerializedPacket.
-  QuicEncryptedPacket* SerializeVersionNegotiationPacket(
-      const QuicVersionVector& supported_versions);
+  std::unique_ptr<QuicEncryptedPacket> SerializeVersionNegotiationPacket(
+      const QuicTransportVersionVector& supported_versions);
 
   // Returns a dummy packet that is valid but contains no useful information.
   static SerializedPacket NoPacket();
@@ -208,69 +190,30 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
   // Sets the maximum packet length.
   void SetMaxPacketLength(QuicByteCount length);
 
-  // Sets the path on which subsequent packets will be created. It is the
-  // caller's responsibility to guarantee no packet is under construction before
-  // calling this function. If |path_id| is different from current_path_,
-  // next_packet_number_length_ is recalculated.
-  void SetCurrentPath(QuicPathId path_id,
-                      QuicPacketNumber least_packet_awaited_by_peer,
-                      QuicPacketCount max_packets_in_flight);
+  // Increases pending_padding_bytes by |size|. Pending padding will be sent by
+  // MaybeAddPadding().
+  void AddPendingPadding(QuicByteCount size);
 
   void set_debug_delegate(DebugDelegate* debug_delegate) {
     debug_delegate_ = debug_delegate;
   }
 
+  QuicByteCount pending_padding_bytes() const { return pending_padding_bytes_; }
+
  private:
   friend class test::QuicPacketCreatorPeer;
 
-  // A QuicRandom wrapper that gets a bucket of entropy and distributes it
-  // bit-by-bit. Replenishes the bucket as needed. Not thread-safe. Expose this
-  // class if single bit randomness is needed elsewhere.
-  class QuicRandomBoolSource {
-   public:
-    // random: Source of entropy. Not owned.
-    explicit QuicRandomBoolSource(QuicRandom* random);
-
-    ~QuicRandomBoolSource();
-
-    // Returns the next random bit from the bucket.
-    bool RandBool();
-
-   private:
-    // Source of entropy.
-    QuicRandom* random_;
-    // Stored random bits.
-    uint64_t bit_bucket_;
-    // The next available bit has "1" in the mask. Zero means empty bucket.
-    uint64_t bit_mask_;
-
-    DISALLOW_COPY_AND_ASSIGN(QuicRandomBoolSource);
-  };
-
   static bool ShouldRetransmit(const QuicFrame& frame);
 
-  // Converts a raw payload to a frame which fits into the current open
-  // packet.  The payload begins at |iov_offset| into the |iov|.
-  // If data is empty and fin is true, the expected behavior is to consume the
-  // fin but return 0.  If any data is consumed, it will be copied into a
-  // new buffer that |frame| will point to and own.
+  // Creates a stream frame which fits into the current open packet. If
+  // |write_length| is 0 and fin is true, the expected behavior is to consume
+  // the fin but return 0.
   void CreateStreamFrame(QuicStreamId id,
-                         QuicIOVector iov,
+                         size_t write_length,
                          size_t iov_offset,
                          QuicStreamOffset offset,
                          bool fin,
                          QuicFrame* frame);
-
-  // Copies |length| bytes from iov starting at offset |iov_offset| into buffer.
-  // |iov| must be at least iov_offset+length total length and buffer must be
-  // at least |length| long.
-  static void CopyToBuffer(QuicIOVector iov,
-                           size_t iov_offset,
-                           size_t length,
-                           char* buffer);
-
-  // Updates packet number length on packet boundary.
-  void MaybeUpdatePacketNumberLength();
 
   void FillPacketHeader(QuicPacketHeader* header);
 
@@ -279,15 +222,13 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
   // saves the |frame| in the next SerializedPacket.
   bool AddFrame(const QuicFrame& frame, bool save_retransmittable_frames);
 
-  // Adds a padding frame to the current packet only if the current packet
-  // contains a handshake message, and there is sufficient room to fit a
-  // padding frame.
+  // Adds a padding frame to the current packet (if there is space) when (1)
+  // current packet needs full padding or (2) there are pending paddings.
   void MaybeAddPadding();
 
   // Serializes all frames which have been added and adds any which should be
   // retransmitted to packet_.retransmittable_frames. All frames must fit into
-  // a single packet. Sets the entropy hash of the serialized packet to a
-  // random bool.
+  // a single packet.
   // Fails if |buffer_len| isn't long enough for the encrypted packet.
   void SerializePacket(char* encrypted_buffer, size_t buffer_len);
 
@@ -302,23 +243,16 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
   // packet's public header.
   bool IncludeNonceInPublicHeader();
 
+  // Returns true if |frame| starts with CHLO.
+  bool StreamFrameStartsWithChlo(const QuicStreamFrame& frame) const;
+
   // Does not own these delegates or the framer.
   DelegateInterface* delegate_;
   DebugDelegate* debug_delegate_;
   QuicFramer* framer_;
 
-  QuicRandomBoolSource random_bool_source_;
-  QuicBufferAllocator* const buffer_allocator_;
-
   // Controls whether version should be included while serializing the packet.
   bool send_version_in_packet_;
-  // Controls whether path id should be included while serializing the packet.
-  bool send_path_id_in_packet_;
-  // Staging variable to hold next packet number length. When sequence
-  // number length is to be changed, this variable holds the new length until
-  // a packet boundary, when the creator's packet_number_length_ can be changed
-  // to this new value.
-  QuicPacketNumberLength next_packet_number_length_;
   // If true, then |nonce_for_public_header_| will be included in the public
   // header of all packets created at the initial encryption level.
   bool have_diversification_nonce_;
@@ -341,12 +275,19 @@ class NET_EXPORT_PRIVATE QuicPacketCreator {
   // Packet used to invoke OnSerializedPacket.
   SerializedPacket packet_;
 
-  // Map mapping path_id to last sent packet number on the path.
-  std::unordered_map<QuicPathId, QuicPacketNumber> multipath_packet_number_;
+  // Pending padding bytes to send. Pending padding bytes will be sent in next
+  // packet(s) (after all other frames) if current constructed packet does not
+  // have room to send all of them.
+  QuicByteCount pending_padding_bytes_;
+
+  // Indicates whether current constructed packet needs full padding to max
+  // packet size. Please note, full padding does not consume pending padding
+  // bytes.
+  bool needs_full_padding_;
 
   DISALLOW_COPY_AND_ASSIGN(QuicPacketCreator);
 };
 
 }  // namespace net
 
-#endif  // NET_QUIC_QUIC_PACKET_CREATOR_H_
+#endif  // NET_QUIC_CORE_QUIC_PACKET_CREATOR_H_

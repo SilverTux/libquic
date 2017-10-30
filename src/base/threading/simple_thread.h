@@ -42,12 +42,12 @@
 
 #include <stddef.h>
 
-#include <queue>
 #include <string>
 #include <vector>
 
 #include "base/base_export.h"
 #include "base/compiler_specific.h"
+#include "base/containers/queue.h"
 #include "base/macros.h"
 #include "base/synchronization/lock.h"
 #include "base/synchronization/waitable_event.h"
@@ -95,12 +95,6 @@ class BASE_EXPORT SimpleThread : public PlatformThread::Delegate {
 
   // Subclasses should override the Run method.
   virtual void Run() = 0;
-
-  // Return the thread name prefix, or "unnamed" if none was supplied.
-  std::string name_prefix() { return name_prefix_; }
-
-  // Return the completed name including TID, only valid after Start().
-  std::string name() { return name_; }
 
   // Return the thread id, only valid after Start().
   PlatformThreadId tid() { return tid_; }
@@ -193,7 +187,7 @@ class BASE_EXPORT DelegateSimpleThreadPool
   const std::string name_prefix_;
   int num_threads_;
   std::vector<DelegateSimpleThread*> threads_;
-  std::queue<Delegate*> delegates_;
+  base::queue<Delegate*> delegates_;
   base::Lock lock_;            // Locks delegates_
   WaitableEvent dry_;    // Not signaled when there is no work to do.
 

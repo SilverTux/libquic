@@ -5,79 +5,73 @@
 #ifndef BASE_TASK_SCHEDULER_DELAYED_TASK_MANAGER_H_
 #define BASE_TASK_SCHEDULER_DELAYED_TASK_MANAGER_H_
 
-#include <stdint.h>
-
 #include <memory>
-#include <queue>
+#include <utility>
 #include <vector>
 
 #include "base/base_export.h"
 #include "base/callback.h"
 #include "base/macros.h"
+#include "base/memory/ptr_util.h"
 #include "base/memory/ref_counted.h"
+#include "base/synchronization/atomic_flag.h"
 #include "base/task_scheduler/scheduler_lock.h"
-#include "base/task_scheduler/sequence.h"
-#include "base/task_scheduler/task.h"
-#include "base/time/time.h"
+#include "base/time/default_tick_clock.h"
+#include "base/time/tick_clock.h"
 
 namespace base {
+
+class TaskRunner;
+
 namespace internal {
 
-class SchedulerWorker;
-class SchedulerWorkerPool;
+struct Task;
 
-// A DelayedTaskManager holds delayed Tasks until they become ripe for
-// execution. This class is thread-safe.
+// The DelayedTaskManager forwards tasks to post task callbacks when they become
+// ripe for execution. Tasks are not forwarded before Start() is called. This
+// class is thread-safe.
 class BASE_EXPORT DelayedTaskManager {
  public:
-  // |on_delayed_run_time_updated| is invoked when the delayed run time is
-  // updated as a result of adding a delayed task to the manager.
-  explicit DelayedTaskManager(const Closure& on_delayed_run_time_updated);
+  // Posts |task| for execution immediately.
+  using PostTaskNowCallback = OnceCallback<void(std::unique_ptr<Task> task)>;
+
+  // |tick_clock| can be specified for testing.
+  DelayedTaskManager(std::unique_ptr<TickClock> tick_clock =
+                         std::make_unique<DefaultTickClock>());
   ~DelayedTaskManager();
 
-  // Adds |task| to a queue of delayed tasks. The task will be posted to
-  // |worker_pool| with |sequence| and |worker| the first time that
-  // PostReadyTasks() is called while Now() is passed |task->delayed_run_time|.
-  // |worker| is a SchedulerWorker owned by |worker_pool| or nullptr.
-  //
-  // TODO(robliao): Find a concrete way to manage the memory of |worker| and
-  // |worker_pool|. These objects are never deleted in production, but it is
-  // better not to spread this assumption throughout the scheduler.
+  // Starts the delayed task manager, allowing past and future tasks to be
+  // forwarded to their callbacks as they become ripe for execution.
+  // |service_thread_task_runner| posts tasks to the TaskScheduler service
+  // thread.
+  void Start(scoped_refptr<TaskRunner> service_thread_task_runner);
+
+  // Schedules a call to |post_task_now_callback| with |task| as argument when
+  // |task| is ripe for execution and Start() has been called.
   void AddDelayedTask(std::unique_ptr<Task> task,
-                      scoped_refptr<Sequence> sequence,
-                      SchedulerWorker* worker,
-                      SchedulerWorkerPool* worker_pool);
-
-  // Posts delayed tasks that are ripe for execution.
-  void PostReadyTasks();
-
-  // Returns the next time at which a delayed task will become ripe for
-  // execution, or a null TimeTicks if there are no pending delayed tasks.
-  TimeTicks GetDelayedRunTime() const;
-
-  // Returns the current time. Can be overridden for tests.
-  virtual TimeTicks Now() const;
+                      PostTaskNowCallback post_task_now_callback);
 
  private:
-  struct DelayedTask;
-  struct DelayedTaskComparator {
-    bool operator()(const DelayedTask& left, const DelayedTask& right) const;
-  };
+  // Schedules a call to |post_task_now_callback| with |task| as argument when
+  // |delay| expires. Start() must have been called before this.
+  void AddDelayedTaskNow(std::unique_ptr<Task> task,
+                         TimeDelta delay,
+                         PostTaskNowCallback post_task_now_callback);
 
-  const Closure on_delayed_run_time_updated_;
+  const std::unique_ptr<TickClock> tick_clock_;
 
-  // Synchronizes access to all members below.
-  mutable SchedulerLock lock_;
+  AtomicFlag started_;
 
-  // Priority queue of delayed tasks. The delayed task with the smallest
-  // |task->delayed_run_time| is in front of the priority queue.
-  using DelayedTaskQueue = std::priority_queue<DelayedTask,
-                                               std::vector<DelayedTask>,
-                                               DelayedTaskComparator>;
-  DelayedTaskQueue delayed_tasks_;
+  // Synchronizes access to all members below before |started_| is set. Once
+  // |started_| is set:
+  // - |service_thread_task_runner| doest not change, so it can be read without
+  //   holding the lock.
+  // - |tasks_added_before_start_| isn't accessed anymore.
+  SchedulerLock lock_;
 
-  // The index to assign to the next delayed task added to the manager.
-  uint64_t delayed_task_index_ = 0;
+  scoped_refptr<TaskRunner> service_thread_task_runner_;
+  std::vector<std::pair<std::unique_ptr<Task>, PostTaskNowCallback>>
+      tasks_added_before_start_;
 
   DISALLOW_COPY_AND_ASSIGN(DelayedTaskManager);
 };

@@ -8,9 +8,9 @@
 #include <stddef.h>
 
 #include <memory>
-#include <queue>
 
 #include "base/base_export.h"
+#include "base/containers/queue.h"
 #include "base/macros.h"
 #include "base/memory/ref_counted.h"
 #include "base/sequence_token.h"
@@ -18,11 +18,15 @@
 #include "base/task_scheduler/sequence_sort_key.h"
 #include "base/task_scheduler/task.h"
 #include "base/task_scheduler/task_traits.h"
+#include "base/threading/sequence_local_storage_map.h"
 
 namespace base {
 namespace internal {
 
-// A sequence holds tasks that must be executed in posting order.
+// A Sequence holds slots each containing up to a single Task that must be
+// executed in posting order.
+//
+// In comments below, an "empty Sequence" is a Sequence with no slot.
 //
 // Note: there is a known refcounted-ownership cycle in the Scheduler
 // architecture: Sequence -> Task -> TaskRunner -> Sequence -> ...
@@ -41,24 +45,35 @@ class BASE_EXPORT Sequence : public RefCountedThreadSafe<Sequence> {
  public:
   Sequence();
 
-  // Adds |task| at the end of the sequence's queue. Returns true if the
-  // sequence was empty before this operation.
+  // Adds |task| in a new slot at the end of the Sequence. Returns true if the
+  // Sequence was empty before this operation.
   bool PushTask(std::unique_ptr<Task> task);
 
-  // Returns the task in front of the sequence's queue, if any.
-  const Task* PeekTask() const;
+  // Transfers ownership of the Task in the front slot of the Sequence to the
+  // caller. The front slot of the Sequence will be nullptr and remain until
+  // Pop(). Cannot be called on an empty Sequence or a Sequence whose front slot
+  // is already nullptr.
+  std::unique_ptr<Task> TakeTask();
 
-  // Removes the task in front of the sequence's queue. Returns true if the
-  // sequence is empty after this operation. Cannot be called on an empty
-  // sequence.
-  bool PopTask();
+  // Returns the TaskTraits of the Task in front of the Sequence. Cannot be
+  // called on an empty Sequence or on a Sequence whose front slot is empty.
+  TaskTraits PeekTaskTraits() const;
 
-  // Returns a SequenceSortKey representing the priority of the sequence. Cannot
-  // be called on an empty sequence.
+  // Removes the front slot of the Sequence. The front slot must have been
+  // emptied by TakeTask() before this is called. Cannot be called on an empty
+  // Sequence. Returns true if the Sequence is empty after this operation.
+  bool Pop();
+
+  // Returns a SequenceSortKey representing the priority of the Sequence. Cannot
+  // be called on an empty Sequence.
   SequenceSortKey GetSortKey() const;
 
   // Returns a token that uniquely identifies this Sequence.
   const SequenceToken& token() const { return token_; }
+
+  SequenceLocalStorageMap* sequence_local_storage() {
+    return &sequence_local_storage_;
+  }
 
  private:
   friend class RefCountedThreadSafe<Sequence>;
@@ -70,11 +85,14 @@ class BASE_EXPORT Sequence : public RefCountedThreadSafe<Sequence> {
   mutable SchedulerLock lock_;
 
   // Queue of tasks to execute.
-  std::queue<std::unique_ptr<Task>> queue_;
+  base::queue<std::unique_ptr<Task>> queue_;
 
-  // Number of tasks contained in the sequence for each priority.
+  // Number of tasks contained in the Sequence for each priority.
   size_t num_tasks_per_priority_[static_cast<int>(TaskPriority::HIGHEST) + 1] =
       {};
+
+  // Holds data stored through the SequenceLocalStorageSlot API.
+  SequenceLocalStorageMap sequence_local_storage_;
 
   DISALLOW_COPY_AND_ASSIGN(Sequence);
 };

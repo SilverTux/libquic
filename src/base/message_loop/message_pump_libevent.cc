@@ -43,12 +43,13 @@
 
 namespace base {
 
-MessagePumpLibevent::FileDescriptorWatcher::FileDescriptorWatcher()
+MessagePumpLibevent::FileDescriptorWatcher::FileDescriptorWatcher(
+    const Location& from_here)
     : event_(NULL),
       pump_(NULL),
       watcher_(NULL),
-      was_destroyed_(NULL) {
-}
+      was_destroyed_(NULL),
+      created_from_location_(from_here) {}
 
 MessagePumpLibevent::FileDescriptorWatcher::~FileDescriptorWatcher() {
   if (event_) {
@@ -73,21 +74,22 @@ bool MessagePumpLibevent::FileDescriptorWatcher::StopWatchingFileDescriptor() {
   return (rv == 0);
 }
 
-void MessagePumpLibevent::FileDescriptorWatcher::Init(event *e) {
+void MessagePumpLibevent::FileDescriptorWatcher::Init(event* e) {
   DCHECK(e);
   DCHECK(!event_);
 
   event_ = e;
 }
 
-event *MessagePumpLibevent::FileDescriptorWatcher::ReleaseEvent() {
-  struct event *e = event_;
+event* MessagePumpLibevent::FileDescriptorWatcher::ReleaseEvent() {
+  struct event* e = event_;
   event_ = NULL;
   return e;
 }
 
 void MessagePumpLibevent::FileDescriptorWatcher::OnFileCanReadWithoutBlocking(
-    int fd, MessagePumpLibevent* pump) {
+    int fd,
+    MessagePumpLibevent* pump) {
   // Since OnFileCanWriteWithoutBlocking() gets called first, it can stop
   // watching the file descriptor.
   if (!watcher_)
@@ -96,7 +98,8 @@ void MessagePumpLibevent::FileDescriptorWatcher::OnFileCanReadWithoutBlocking(
 }
 
 void MessagePumpLibevent::FileDescriptorWatcher::OnFileCanWriteWithoutBlocking(
-    int fd, MessagePumpLibevent* pump) {
+    int fd,
+    MessagePumpLibevent* pump) {
   DCHECK(watcher_);
   watcher_->OnFileCanWriteWithoutBlocking(fd);
 }
@@ -109,7 +112,7 @@ MessagePumpLibevent::MessagePumpLibevent()
       wakeup_pipe_in_(-1),
       wakeup_pipe_out_(-1) {
   if (!Init())
-     NOTREACHED();
+    NOTREACHED();
 }
 
 MessagePumpLibevent::~MessagePumpLibevent() {
@@ -131,8 +134,8 @@ MessagePumpLibevent::~MessagePumpLibevent() {
 bool MessagePumpLibevent::WatchFileDescriptor(int fd,
                                               bool persistent,
                                               int mode,
-                                              FileDescriptorWatcher *controller,
-                                              Watcher *delegate) {
+                                              FileDescriptorWatcher* controller,
+                                              Watcher* delegate) {
   DCHECK_GE(fd, 0);
   DCHECK(controller);
   DCHECK(delegate);
@@ -150,13 +153,12 @@ bool MessagePumpLibevent::WatchFileDescriptor(int fd,
   }
 
   std::unique_ptr<event> evt(controller->ReleaseEvent());
-  if (evt.get() == NULL) {
+  if (!evt) {
     // Ownership is transferred to the controller.
     evt.reset(new event);
   } else {
     // Make sure we don't pick up any funky internal libevent masks.
-    int old_interest_mask = evt.get()->ev_events &
-        (EV_READ | EV_WRITE | EV_PERSIST);
+    int old_interest_mask = evt->ev_events & (EV_READ | EV_WRITE | EV_PERSIST);
 
     // Combine old/new event masks.
     event_mask |= old_interest_mask;
@@ -177,11 +179,13 @@ bool MessagePumpLibevent::WatchFileDescriptor(int fd,
 
   // Tell libevent which message pump this socket will belong to when we add it.
   if (event_base_set(event_base_, evt.get())) {
+    DPLOG(ERROR) << "event_base_set(fd=" << EVENT_FD(evt.get()) << ")";
     return false;
   }
 
   // Add this socket to the list of monitored sockets.
   if (event_add(evt.get(), NULL)) {
+    DPLOG(ERROR) << "event_add failed(fd=" << EVENT_FD(evt.get()) << ")";
     return false;
   }
 
@@ -195,9 +199,8 @@ bool MessagePumpLibevent::WatchFileDescriptor(int fd,
 }
 
 // Tell libevent to break out of inner loop.
-static void timer_callback(int fd, short events, void *context)
-{
-  event_base_loopbreak((struct event_base *)context);
+static void timer_callback(int fd, short events, void* context) {
+  event_base_loopbreak((struct event_base*)context);
 }
 
 // Reentrant!
@@ -290,16 +293,8 @@ void MessagePumpLibevent::ScheduleDelayedWork(
 
 bool MessagePumpLibevent::Init() {
   int fds[2];
-  if (pipe(fds)) {
-    DLOG(ERROR) << "pipe() failed, errno: " << errno;
-    return false;
-  }
-  if (!SetNonBlocking(fds[0])) {
-    DLOG(ERROR) << "SetNonBlocking for pipe fd[0] failed, errno: " << errno;
-    return false;
-  }
-  if (!SetNonBlocking(fds[1])) {
-    DLOG(ERROR) << "SetNonBlocking for pipe fd[1] failed, errno: " << errno;
+  if (!CreateLocalNonBlockingPipe(fds)) {
+    DPLOG(ERROR) << "pipe creation failed";
     return false;
   }
   wakeup_pipe_out_ = fds[0];
@@ -322,8 +317,11 @@ void MessagePumpLibevent::OnLibeventNotification(int fd,
   FileDescriptorWatcher* controller =
       static_cast<FileDescriptorWatcher*>(context);
   DCHECK(controller);
-  TRACE_EVENT1("toplevel", "MessagePumpLibevent::OnLibeventNotification",
-               "fd", fd);
+  TRACE_EVENT2("toplevel", "MessagePumpLibevent::OnLibeventNotification",
+               "src_file", controller->created_from_location().file_name(),
+               "src_func", controller->created_from_location().function_name());
+  TRACE_HEAP_PROFILER_API_SCOPED_TASK_EXECUTION heap_profiler_scope(
+      controller->created_from_location().file_name());
 
   MessagePumpLibevent* pump = controller->pump();
   pump->processed_io_events_ = true;

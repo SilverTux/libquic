@@ -37,18 +37,19 @@
 // mode is ended via |FinishBatchOperations|, the current packet
 // will be serialzied, even if it is not full.
 
-#ifndef NET_QUIC_QUIC_PACKET_GENERATOR_H_
-#define NET_QUIC_QUIC_PACKET_GENERATOR_H_
+#ifndef NET_QUIC_CORE_QUIC_PACKET_GENERATOR_H_
+#define NET_QUIC_CORE_QUIC_PACKET_GENERATOR_H_
 
-#include <stddef.h>
-#include <stdint.h>
-
+#include <cstddef>
+#include <cstdint>
 #include <list>
 
 #include "base/macros.h"
 #include "net/quic/core/quic_packet_creator.h"
+#include "net/quic/core/quic_pending_retransmission.h"
 #include "net/quic/core/quic_sent_packet_manager.h"
 #include "net/quic/core/quic_types.h"
+#include "net/quic/platform/api/quic_export.h"
 
 namespace net {
 
@@ -56,9 +57,9 @@ namespace test {
 class QuicPacketGeneratorPeer;
 }  // namespace test
 
-class NET_EXPORT_PRIVATE QuicPacketGenerator {
+class QUIC_EXPORT_PRIVATE QuicPacketGenerator {
  public:
-  class NET_EXPORT_PRIVATE DelegateInterface
+  class QUIC_EXPORT_PRIVATE DelegateInterface
       : public QuicPacketCreator::DelegateInterface {
    public:
     ~DelegateInterface() override {}
@@ -73,7 +74,6 @@ class NET_EXPORT_PRIVATE QuicPacketGenerator {
   QuicPacketGenerator(QuicConnectionId connection_id,
                       QuicFramer* framer,
                       QuicRandom* random_generator,
-                      QuicBufferAllocator* buffer_allocator,
                       DelegateInterface* delegate);
 
   ~QuicPacketGenerator();
@@ -90,26 +90,27 @@ class NET_EXPORT_PRIVATE QuicPacketGenerator {
   // Given some data, may consume part or all of it and pass it to the
   // packet creator to be serialized into packets. If not in batch
   // mode, these packets will also be sent during this call.
-  // |delegate| (if not nullptr) will be informed once all packets sent as a
-  // result of this call are ACKed by the peer.
+  // When |state| is FIN_AND_PADDING, random padding of size [1, 256] will be
+  // added after stream frames. If current constructed packet cannot
+  // accommodate, the padding will overflow to the next packet(s).
   QuicConsumedData ConsumeData(QuicStreamId id,
-                               QuicIOVector iov,
+                               size_t write_length,
                                QuicStreamOffset offset,
-                               bool fin,
-                               QuicAckListenerInterface* listener);
+                               StreamSendingState state);
 
   // Sends as many data only packets as allowed by the send algorithm and the
   // available iov.
-  // This path does not support FEC, padding, or bundling pending frames.
+  // This path does not support padding, or bundling pending frames.
+  // In case we access this method from ConsumeData, total_bytes_consumed
+  // keeps track of how many bytes have already been consumed.
   QuicConsumedData ConsumeDataFastPath(QuicStreamId id,
-                                       const QuicIOVector& iov,
+                                       size_t write_length,
                                        QuicStreamOffset offset,
                                        bool fin,
-                                       QuicAckListenerInterface* listener);
+                                       size_t total_bytes_consumed);
 
   // Generates an MTU discovery packet of specified size.
-  void GenerateMtuDiscoveryPacket(QuicByteCount target_mtu,
-                                  QuicAckListenerInterface* listener);
+  void GenerateMtuDiscoveryPacket(QuicByteCount target_mtu);
 
   // Indicates whether batch mode is currently enabled.
   bool InBatchMode();
@@ -135,15 +136,12 @@ class NET_EXPORT_PRIVATE QuicPacketGenerator {
   void SetDiversificationNonce(const DiversificationNonce& nonce);
 
   // Creates a version negotiation packet which supports |supported_versions|.
-  // Caller owns the created  packet. Also, sets the entropy hash of the
-  // serialized packet to a random bool and returns that value as a member of
-  // SerializedPacket.
-  QuicEncryptedPacket* SerializeVersionNegotiationPacket(
-      const QuicVersionVector& supported_versions);
+  std::unique_ptr<QuicEncryptedPacket> SerializeVersionNegotiationPacket(
+      const QuicTransportVersionVector& supported_versions);
 
   // Re-serializes frames with the original packet's packet number length.
   // Used for retransmitting packets to ensure they aren't too long.
-  void ReserializeAllFrames(const PendingRetransmission& retransmission,
+  void ReserializeAllFrames(const QuicPendingRetransmission& retransmission,
                             char* buffer,
                             size_t buffer_len);
 
@@ -157,6 +155,10 @@ class NET_EXPORT_PRIVATE QuicPacketGenerator {
 
   // Sets the encrypter to use for the encryption level.
   void SetEncrypter(EncryptionLevel level, QuicEncrypter* encrypter);
+
+  // Returns true if there are control frames or current constructed packet has
+  // pending retransmittable frames.
+  bool HasRetransmittableFrames() const;
 
   // Sets the encryption level that will be applied to new packets.
   void set_encryption_level(EncryptionLevel level);
@@ -172,16 +174,9 @@ class NET_EXPORT_PRIVATE QuicPacketGenerator {
   // when there are frames queued in the creator.
   void SetMaxPacketLength(QuicByteCount length);
 
-  // Sets |path_id| to be the path on which next packet is generated.
-  void SetCurrentPath(QuicPathId path_id,
-                      QuicPacketNumber least_packet_awaited_by_peer,
-                      QuicPacketCount max_packets_in_flight);
-
   void set_debug_delegate(QuicPacketCreator::DebugDelegate* debug_delegate) {
     packet_creator_.set_debug_delegate(debug_delegate);
   }
-
-  const QuicAckFrame& pending_ack_frame() const { return pending_ack_frame_; }
 
  private:
   friend class test::QuicPacketGeneratorPeer;
@@ -199,6 +194,13 @@ class NET_EXPORT_PRIVATE QuicPacketGenerator {
   // fit into current open packet.
   bool AddNextPendingFrame();
 
+  // Adds a random amount of padding (between 1 to 256 bytes).
+  void AddRandomPadding();
+
+  // Sends remaining pending padding.
+  // Pending paddings should only be sent when there is nothing else to send.
+  void SendRemainingPendingPadding();
+
   DelegateInterface* delegate_;
 
   QuicPacketCreator packet_creator_;
@@ -214,12 +216,13 @@ class NET_EXPORT_PRIVATE QuicPacketGenerator {
   // a reference to it until we flush (and serialize it). Retransmittable frames
   // are referenced elsewhere so that they can later be (optionally)
   // retransmitted.
-  QuicAckFrame pending_ack_frame_;
   QuicStopWaitingFrame pending_stop_waiting_frame_;
+
+  QuicRandom* random_generator_;
 
   DISALLOW_COPY_AND_ASSIGN(QuicPacketGenerator);
 };
 
 }  // namespace net
 
-#endif  // NET_QUIC_QUIC_PACKET_GENERATOR_H_
+#endif  // NET_QUIC_CORE_QUIC_PACKET_GENERATOR_H_

@@ -9,25 +9,35 @@
 // These are also used in the IPCs for coordinating inter-process memory dumps.
 
 #include <stdint.h>
+#include <map>
+#include <memory>
 #include <string>
 
 #include "base/base_export.h"
 #include "base/callback.h"
+#include "base/optional.h"
+#include "base/process/process_handle.h"
 
 namespace base {
 namespace trace_event {
 
+class ProcessMemoryDump;
+
 // Captures the reason why a memory dump is being requested. This is to allow
-// selective enabling of dumps, filtering and post-processing.
+// selective enabling of dumps, filtering and post-processing. Keep this
+// consistent with memory_instrumentation.mojo and
+// memory_instrumentation_struct_traits.{h,cc}
 enum class MemoryDumpType {
-  TASK_BEGIN,         // Dumping memory at the beginning of a message-loop task.
-  TASK_END,           // Dumping memory at the ending of a message-loop task.
-  PERIODIC_INTERVAL,  // Dumping memory at periodic intervals.
+  PERIODIC_INTERVAL,     // Dumping memory at periodic intervals.
   EXPLICITLY_TRIGGERED,  // Non maskable dump request.
-  LAST = EXPLICITLY_TRIGGERED // For IPC macros.
+  PEAK_MEMORY_USAGE,     // Dumping memory at detected peak total memory usage.
+  SUMMARY_ONLY,          // Calculate just the summary & don't add to the trace.
+  LAST = SUMMARY_ONLY
 };
 
 // Tells the MemoryDumpProvider(s) how much detailed their dumps should be.
+// Keep this consistent with memory_instrumentation.mojo and
+// memory_instrumentation_struct_traits.{h,cc}
 enum class MemoryDumpLevelOfDetail : uint32_t {
   FIRST,
 
@@ -43,14 +53,17 @@ enum class MemoryDumpLevelOfDetail : uint32_t {
   // Few entries, typically a fixed number, per dump.
   LIGHT,
 
+  // Retrieve only memory maps. Used only for the heap profiler.
+  VM_REGIONS_ONLY_FOR_HEAP_PROFILER,
+
   // Unrestricted amount of entries per dump.
   DETAILED,
 
   LAST = DETAILED
 };
 
-// Initial request arguments for a global memory dump. (see
-// MemoryDumpManager::RequestGlobalMemoryDump()).
+// Keep this consistent with memory_instrumentation.mojo and
+// memory_instrumentation_struct_traits.{h,cc}
 struct BASE_EXPORT MemoryDumpRequestArgs {
   // Globally unique identifier. In multi-process dumps, all processes issue a
   // local dump with the same guid. This allows the trace importers to
@@ -61,16 +74,33 @@ struct BASE_EXPORT MemoryDumpRequestArgs {
   MemoryDumpLevelOfDetail level_of_detail;
 };
 
+// Initial request arguments for a global memory dump. (see
+// MemoryDumpManager::RequestGlobalMemoryDump()). Keep this consistent with
+// memory_instrumentation.mojo and memory_instrumentation_struct_traits.{h,cc}
+// TODO(hjd): Move this to memory_instrumentation, crbug.com/776726
+struct BASE_EXPORT GlobalMemoryDumpRequestArgs {
+  MemoryDumpType dump_type;
+  MemoryDumpLevelOfDetail level_of_detail;
+};
+
 // Args for ProcessMemoryDump and passed to OnMemoryDump calls for memory dump
 // providers. Dump providers are expected to read the args for creating dumps.
 struct MemoryDumpArgs {
   // Specifies how detailed the dumps should be.
   MemoryDumpLevelOfDetail level_of_detail;
+
+  // Globally unique identifier. In multi-process dumps, all processes issue a
+  // local dump with the same guid. This allows the trace importers to
+  // reconstruct the global dump.
+  uint64_t dump_guid;
 };
 
-using MemoryDumpCallback = Callback<void(uint64_t dump_guid, bool success)>;
+using ProcessMemoryDumpCallback = Callback<
+    void(bool success, uint64_t dump_guid, std::unique_ptr<ProcessMemoryDump>)>;
 
 BASE_EXPORT const char* MemoryDumpTypeToString(const MemoryDumpType& dump_type);
+
+BASE_EXPORT MemoryDumpType StringToMemoryDumpType(const std::string& str);
 
 BASE_EXPORT const char* MemoryDumpLevelOfDetailToString(
     const MemoryDumpLevelOfDetail& level_of_detail);
